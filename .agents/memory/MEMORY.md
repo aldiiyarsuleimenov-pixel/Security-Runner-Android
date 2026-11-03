@@ -1,2 +1,0 @@
-- [Responsive preview breakpoints](responsive-preview-breakpoints.md) — use viewport size and orientation for core mobile layouts; previews may not report touch-only hover capabilities.
-- [Movement-control semantics](movement-control-semantics.md) — slam locks steering/jump only during descent; landing restores control, dash can interrupt, and slide lasts five seconds.
