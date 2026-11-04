@@ -25,7 +25,7 @@ type InputState = {
   groundSlam: boolean;
 };
 
-type Rect = { id: string | number; x: number; y: number; width: number; height: number; kind?: string };
+type Rect = { id: string | number; x: number; y: number; width: number; height: number; kind?: string; dir?: 0 | 1 | 2 | 3 };
 type Snapshot = {
   player: {
     x: number; y: number; vx: number; vy: number; width: number; height: number;
@@ -257,21 +257,29 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
   for (const spike of snap.spikes) {
     const x = worldX(spike.x);
     if (x + spike.width < -60 || x > vw + 60) continue;
-    const count = Math.max(1, Math.floor(spike.width / 17));
-    const each = spike.width / count;
+    const dir = spike.dir ?? 0;
+    const horiz = dir === 0 || dir === 2;
+    const len = horiz ? spike.width : spike.height;
+    const count = Math.max(1, Math.floor(len / 17));
+    const each = len / count;
+    const sy = spike.y, w = spike.width, h = spike.height;
     for (let i = 0; i < count; i++) {
-      const left = x + i * each;
+      const p0 = i * each, p1 = (i + 1) * each, pm = (p0 + p1) / 2;
       ctx.beginPath();
-      ctx.moveTo(left, spike.y + spike.height);
-      ctx.lineTo(left + each * .5, spike.y);
-      ctx.lineTo(left + each, spike.y + spike.height);
+      if (dir === 0) { ctx.moveTo(x + p0, sy + h); ctx.lineTo(x + pm, sy); ctx.lineTo(x + p1, sy + h); }
+      else if (dir === 2) { ctx.moveTo(x + p0, sy); ctx.lineTo(x + pm, sy + h); ctx.lineTo(x + p1, sy); }
+      else if (dir === 1) { ctx.moveTo(x, sy + p0); ctx.lineTo(x + w, sy + pm); ctx.lineTo(x, sy + p1); }
+      else { ctx.moveTo(x + w, sy + p0); ctx.lineTo(x, sy + pm); ctx.lineTo(x + w, sy + p1); }
       ctx.closePath();
       ctx.fillStyle = '#c3c5b7';
       ctx.fill();
       ctx.strokeStyle = '#f2744f'; ctx.lineWidth = 1.4; ctx.stroke();
     }
     ctx.fillStyle = 'rgba(242,116,79,.13)';
-    ctx.fillRect(x, spike.y + spike.height - 2, spike.width, 6);
+    if (dir === 0) ctx.fillRect(x, sy + h - 2, w, 6);
+    else if (dir === 2) ctx.fillRect(x, sy - 4, w, 6);
+    else if (dir === 1) ctx.fillRect(x - 4, sy, 6, h);
+    else ctx.fillRect(x + w - 2, sy, 6, h);
   }
 
   // Uncollected score shards pulse between cyan and pale metal.
@@ -405,6 +413,7 @@ function App() {
   const [level1Done, setLevel1Done] = useState(() => isLevel1Done());
   const [levelsTick, setLevelsTick] = useState(0);
   const versionTaps = useRef({ count: 0, last: 0 });
+  const [tapCount, setTapCount] = useState(0);
   const [devDialog, setDevDialog] = useState<'closed' | 'enter' | 'leave'>('closed');
   const [devInput, setDevInput] = useState('');
   const [devError, setDevError] = useState(false);
@@ -735,6 +744,7 @@ function App() {
     const t = versionTaps.current;
     t.count = now - t.last < 1200 ? t.count + 1 : 1;
     t.last = now;
+    setTapCount(t.count < 5 ? t.count : 0);
     if (t.count < 5) return;
     t.count = 0;
     setDevInput('');
@@ -756,7 +766,7 @@ function App() {
     <main className={`sr-title-screen ${showEffects ? '' : 'no-neon'}`}>
       <div className="sr-title-city" />
       <div className="sr-title-scanlines" />
-      <div className="sr-title-brand"><span>SECURITY</span><span>RUNNER</span><i /></div>
+      <div className="sr-title-brand" onClick={tapVersion}><span>SECURITY</span><span>RUNNER</span><i /></div>
       <nav className="sr-title-nav" aria-label="Главное меню">
         <button className="sr-menu-button is-primary" onClick={beginGame}><span>▶</span> НАЧАТЬ</button>
         <button className="sr-menu-button" onClick={() => setPage('levels')}>УРОВНИ</button>
@@ -765,7 +775,7 @@ function App() {
         <button className="sr-menu-button" onClick={() => window.alert('Чтобы выйти из игры, закройте вкладку браузера.')}>ВЫХОД</button>
       </nav>
       <div className="sr-rooftop"><div className="sr-robot"><i /><b /><span /></div></div>
-      <div className="sr-version" onPointerDown={tapVersion}>v1.0.0{devMode ? ' · DEV' : ''}</div>
+      <div className="sr-version" onClick={tapVersion}>v1.2.0{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
       {devDialog !== 'closed' && (
         <div className="sr-dev-dialog" role="dialog" aria-modal="true">
           <div className="sr-dev-card">

@@ -2,16 +2,33 @@ plugins {
     id 'com.android.application'
 }
 
+// Stable signing key so every build is signed the same way and APK updates
+// install over the previous version (no need to uninstall first).
+// The keystore is stored as base64 text so it can be uploaded to GitHub from a phone.
+def keystoreFile = new File(buildDir, 'signing/security-runner.keystore')
+keystoreFile.parentFile.mkdirs()
+keystoreFile.bytes = java.util.Base64.getMimeDecoder().decode(file('security-runner.keystore.b64').text)
+
 android {
     namespace 'com.securityrunner.game'
     compileSdk 35
+
+    signingConfigs {
+        debug {
+            storeFile keystoreFile
+            storePassword 'android'
+            keyAlias 'security-runner'
+            keyPassword 'android'
+        }
+    }
 
     defaultConfig {
         applicationId 'com.securityrunner.game'
         minSdk 23
         targetSdk 35
-        versionCode 1
-        versionName '1.0.0'
+        // GitHub Actions run number keeps growing, so each build counts as a newer version.
+        versionCode (System.getenv('GITHUB_RUN_NUMBER') ?: '2') as int
+        versionName '1.2.0'
     }
 }
 

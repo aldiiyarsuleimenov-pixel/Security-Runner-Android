@@ -14,6 +14,8 @@ export interface GameRect {
   y: number;
   width: number;
   height: number;
+  /** Spikes only: direction the teeth point (0 up, 1 right, 2 down, 3 left). */
+  dir?: 0 | 1 | 2 | 3;
 }
 
 export interface GamePlatform extends GameRect {
@@ -303,18 +305,14 @@ export class GameEngine {
 
     const hitSpike =
       this.hitInvulnerability === 0 &&
-      this.level.spikes.some((spike) =>
-        overlaps(
-          this.x + 4,
-          this.y + 3,
-          this.width - 8,
-          this.height - 5,
-          spike.x + 4,
-          spike.y + 5,
-          spike.width - 8,
-          spike.height - 5,
-        ),
-      );
+      this.level.spikes.some((spike) => {
+        const d = spike.dir ?? 0;
+        const hx = d === 1 ? 0 : d === 3 ? 5 : 4;
+        const hy = d === 0 ? 5 : d === 2 ? 0 : 4;
+        const hw = spike.width - (d === 1 || d === 3 ? 5 : 8);
+        const hh = spike.height - (d === 0 || d === 2 ? 5 : 8);
+        return overlaps(this.x + 4, this.y + 3, this.width - 8, this.height - 5, spike.x + hx, spike.y + hy, hw, hh);
+      });
     if (hitSpike) {
       this.health = Math.max(0, this.health - 34);
       this.hitInvulnerability = 1.15;

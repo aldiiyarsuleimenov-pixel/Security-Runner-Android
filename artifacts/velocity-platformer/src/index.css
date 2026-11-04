@@ -620,3 +620,15 @@ button:focus-visible { outline: 2px solid #64e4df; outline-offset: 3px; }
 .sr-dev-card small { color:#ff7a59; }
 .sr-dev-card div { display:flex; gap:8px; }
 .sr-dev-card textarea { background:#172022; color:#fff; border:1px solid #2f4244; padding:8px; font:12px monospace; width:100%; box-sizing:border-box; }
+
+/* ---------- Editor v2: menu, selection bar, compact header ---------- */
+.ed-bar { flex-wrap:nowrap; overflow-x:auto; }
+.ed-actions { flex-wrap:nowrap; flex:0 0 auto; }
+.ed-bar .settings-trigger, .ed-selbar .ed-tool { flex:0 0 auto; white-space:nowrap; }
+.ed-name { flex:1 1 120px; min-width:90px; }
+.ed-menu { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 10px; background:#101a1c; border-bottom:1px solid #243133; }
+.ed-len { font-size:12px; opacity:.8; }
+.ed-selbar { background:#111c1e; }
+.ed-selcount { flex:0 0 auto; font-size:12px; color:#65e4df; align-self:center; padding-right:4px; }
+.ed-tool:disabled, .ed-bar .settings-trigger:disabled { opacity:.35; }
+.ed-foot { flex-wrap:nowrap; min-height:30px; }
