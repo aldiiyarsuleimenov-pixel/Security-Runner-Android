@@ -5,6 +5,41 @@ export interface LevelPickup {
   x: number;
   y: number;
   size: number;
+  group?: string;
+  color?: string;
+}
+
+export interface LevelText {
+  id: string;
+  x: number;
+  y: number;
+  text: string;
+  size: number;
+  color: string;
+  group?: string;
+}
+
+export type TriggerAction = "move" | "rotate" | "hide" | "show" | "color";
+
+/** An invisible zone: when the player enters it, the action is applied to every object whose group equals `target`. */
+export interface LevelTrigger {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  action: TriggerAction;
+  target: string;
+  once: boolean;
+  /** move: offset in world units. */
+  dx: number;
+  dy: number;
+  /** rotate: +90 clockwise, -90 counter-clockwise. */
+  angle: 90 | -90;
+  /** color: CSS color to apply. */
+  color: string;
+  /** Seconds the move / rotate animation takes. */
+  duration: number;
 }
 
 export interface LevelData {
@@ -20,6 +55,27 @@ export interface LevelData {
   platforms: GamePlatform[];
   spikes: GameRect[];
   pickups: LevelPickup[];
+  texts?: LevelText[];
+  triggers?: LevelTrigger[];
+  /** Embedded images (data URLs), referenced by id from `bg` and from platform `skin`. */
+  images?: Record<string, string>;
+  /** Image id used as the level background. */
+  bg?: string;
+}
+
+/** Fill in fields that older saved levels do not have. */
+export function normalizeLevel(l: LevelData): LevelData {
+  return { ...l, texts: l.texts ?? [], triggers: l.triggers ?? [], images: l.images ?? {} };
+}
+
+/** Drop embedded images nothing refers to, so saved levels stay small. */
+export function pruneImages(l: LevelData): LevelData {
+  const used = new Set<string>();
+  if (l.bg) used.add(l.bg);
+  for (const p of l.platforms) if (p.skin) used.add(p.skin);
+  const images: Record<string, string> = {};
+  for (const [id, url] of Object.entries(l.images ?? {})) if (used.has(id)) images[id] = url;
+  return { ...l, images };
 }
 
 export const GRID = 24;
@@ -75,7 +131,7 @@ export const LEVEL_1: LevelData = {
 };
 
 /** Story levels shipped with the game, in default order. */
-export const STORY_LEVELS: LevelData[] = [LEVEL_1];
+export const STORY_LEVELS: LevelData[] = [normalizeLevel(LEVEL_1)];
 
 /** Levels the developer published and bundled into the build (paste exported JSON here). */
 export const BUNDLED_PUBLISHED: LevelData[] = [];
@@ -91,5 +147,8 @@ export function blankLevel(): LevelData {
     platforms: [p("g0", -1000, FLOOR_Y, 1000 + 2400, 100, "ground")],
     spikes: [],
     pickups: [],
+    texts: [],
+    triggers: [],
+    images: {},
   };
 }

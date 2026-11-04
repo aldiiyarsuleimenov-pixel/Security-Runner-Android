@@ -9,6 +9,7 @@ import {
 } from 'react';
 import { GameEngine } from './game/GameEngine';
 import Editor from './Editor';
+import { drawText, drawTiled, getImg, hashId, spinAround } from './game/draw';
 import { LEVEL_1, STORY_LEVELS, type LevelData } from './game/levels';
 import {
   DEV_CODE, getStoryOrder, isDevMode, isLevel1Done, loadPublished, markLevel1Done, setDevMode,
@@ -25,7 +26,7 @@ type InputState = {
   groundSlam: boolean;
 };
 
-type Rect = { id: string | number; x: number; y: number; width: number; height: number; kind?: string; dir?: 0 | 1 | 2 | 3 };
+type Rect = { id: string | number; x: number; y: number; width: number; height: number; kind?: string; dir?: 0 | 1 | 2 | 3; skin?: string; color?: string; hidden?: boolean; spin?: number };
 type Snapshot = {
   player: {
     x: number; y: number; vx: number; vy: number; width: number; height: number;
@@ -35,7 +36,10 @@ type Snapshot = {
   worldWidth: number; worldHeight: number;
   platforms: Rect[];
   spikes: Rect[];
-  pickups: { id: string | number; x: number; y: number; size: number; collected: boolean }[];
+  pickups: { id: string | number; x: number; y: number; size: number; collected: boolean; color?: string; hidden?: boolean }[];
+  texts: { id: string; x: number; y: number; text: string; size: number; color: string; hidden?: boolean }[];
+  bg?: string; images: Record<string, string>;
+  techFlash: number; techKind: string; trail: { x: number; y: number; width: number; height: number; age: number }[];
   exit: Rect;
   effects: { id: string | number; x: number; y: number; kind: string; age: number; duration: number }[];
   score: number; deaths: number; complete: boolean; checkpointX: number;
@@ -231,32 +235,58 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
     ctx.fillStyle = '#151d1f';
   }
 
+  // Custom level background image (parallax, repeated horizontally) replaces the default scenery.
+  const bgImg = getImg(snap.bg ? snap.images[snap.bg] : undefined);
+  if (bgImg) {
+    const scale = vh / bgImg.naturalHeight;
+    const tileW = bgImg.naturalWidth * scale;
+    let bx = -((camera * .25) % tileW);
+    if (bx > 0) bx -= tileW;
+    for (; bx < vw; bx += tileW) ctx.drawImage(bgImg, bx, 0, tileW + 1, vh);
+    ctx.fillStyle = 'rgba(8,12,13,.22)';
+    ctx.fillRect(0, 0, vw, vh);
+  }
+
   // Platforms: top edges catch the light so every landing reads at speed.
   for (const platform of snap.platforms) {
+    if (platform.hidden) continue;
     const x = worldX(platform.x);
     if (x + platform.width < -100 || x > vw + 100) continue;
-    const isMetal = platform.kind?.toLowerCase().includes('metal') || platform.kind?.toLowerCase().includes('steel');
-    ctx.fillStyle = platform.kind === 'block' || platform.kind === 'half' ? '#3b5052' : isMetal ? '#394649' : '#2b3537';
-    ctx.fillRect(x, platform.y, platform.width, platform.height);
-    ctx.fillStyle = '#85958e';
-    ctx.fillRect(x, platform.y, platform.width, Math.min(3, platform.height));
-    ctx.fillStyle = 'rgba(7,12,13,.35)';
-    ctx.fillRect(x, platform.y + 5, platform.width, Math.max(0, platform.height - 5));
-    ctx.fillStyle = '#586563';
-    for (let bx = x + 13; bx < x + platform.width - 8; bx += 52) {
-      ctx.fillRect(bx, platform.y + 9, 3, 3);
+    ctx.save();
+    spinAround(ctx, x, platform.y, platform.width, platform.height, platform.spin);
+    const skin = getImg(platform.skin ? snap.images[platform.skin] : undefined);
+    const isSolid = platform.kind === 'block' || platform.kind === 'half';
+    if (skin) {
+      drawTiled(ctx, skin, x, platform.y, platform.width, platform.height, 0, vw);
+      if (platform.color) { ctx.globalAlpha = .4; ctx.fillStyle = platform.color; ctx.fillRect(x, platform.y, platform.width, platform.height); ctx.globalAlpha = 1; }
+      ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 1;
+      ctx.strokeRect(x + .5, platform.y + .5, platform.width - 1, Math.min(platform.height, 200) - 1);
+    } else {
+      ctx.fillStyle = platform.color ?? (isSolid ? '#3b5052' : '#2b3537');
+      ctx.fillRect(x, platform.y, platform.width, platform.height);
+      ctx.fillStyle = platform.color ? 'rgba(255,255,255,.35)' : '#85958e';
+      ctx.fillRect(x, platform.y, platform.width, Math.min(3, platform.height));
+      ctx.fillStyle = 'rgba(7,12,13,.35)';
+      ctx.fillRect(x, platform.y + 5, platform.width, Math.max(0, platform.height - 5));
+      ctx.fillStyle = '#586563';
+      for (let bx = x + 13; bx < x + platform.width - 8; bx += 52) {
+        ctx.fillRect(bx, platform.y + 9, 3, 3);
+      }
+      if (platform.height > 15) {
+        ctx.strokeStyle = 'rgba(120,142,135,.17)';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x, platform.y + 11); ctx.lineTo(x + platform.width, platform.y + 11); ctx.stroke();
+      }
     }
-    if (platform.height > 15) {
-      ctx.strokeStyle = 'rgba(120,142,135,.17)';
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(x, platform.y + 11); ctx.lineTo(x + platform.width, platform.y + 11); ctx.stroke();
-    }
+    ctx.restore();
   }
 
   // Hazard teeth are high-contrast silhouettes with a hot warning edge.
   for (const spike of snap.spikes) {
     const x = worldX(spike.x);
-    if (x + spike.width < -60 || x > vw + 60) continue;
+    if (spike.hidden || x + spike.width < -60 || x > vw + 60) continue;
+    ctx.save();
+    spinAround(ctx, x, spike.y, spike.width, spike.height, spike.spin);
     const dir = spike.dir ?? 0;
     const horiz = dir === 0 || dir === 2;
     const len = horiz ? spike.width : spike.height;
@@ -271,7 +301,7 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
       else if (dir === 1) { ctx.moveTo(x, sy + p0); ctx.lineTo(x + w, sy + pm); ctx.lineTo(x, sy + p1); }
       else { ctx.moveTo(x + w, sy + p0); ctx.lineTo(x, sy + pm); ctx.lineTo(x + w, sy + p1); }
       ctx.closePath();
-      ctx.fillStyle = '#c3c5b7';
+      ctx.fillStyle = spike.color ?? '#c3c5b7';
       ctx.fill();
       ctx.strokeStyle = '#f2744f'; ctx.lineWidth = 1.4; ctx.stroke();
     }
@@ -280,24 +310,48 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
     else if (dir === 2) ctx.fillRect(x, sy - 4, w, 6);
     else if (dir === 1) ctx.fillRect(x - 4, sy, 6, h);
     else ctx.fillRect(x + w - 2, sy, 6, h);
+    ctx.restore();
   }
 
-  // Uncollected score shards pulse between cyan and pale metal.
+  // Uncollected score shards: large, glowing and bobbing so they read from far away.
   for (const pickup of snap.pickups) {
-    if (pickup.collected) continue;
+    if (pickup.collected || pickup.hidden) continue;
     const x = worldX(pickup.x);
-    const pulse = 1 + Math.sin(clock * 5 + Number(pickup.id) * .7) * .12;
-    const size = pickup.size * pulse;
+    if (x < -40 || x > vw + 40) continue;
+    const phase = hashId(pickup.id) * .7;
+    const pulse = 1 + Math.sin(clock * 5 + phase) * .14;
+    const size = Math.max(pickup.size, 18) * 1.45 * pulse;
+    const bob = Math.sin(clock * 2.6 + phase) * 4;
+    const main = pickup.color ?? '#65e4df';
     ctx.save();
-    ctx.translate(x, pickup.y);
+    ctx.translate(x, pickup.y + bob);
+    // soft halo + ring
+    const halo = ctx.createRadialGradient(0, 0, 2, 0, 0, size * 1.7);
+    halo.addColorStop(0, 'rgba(101,228,223,.45)');
+    halo.addColorStop(1, 'rgba(101,228,223,0)');
+    ctx.fillStyle = halo;
+    ctx.beginPath(); ctx.arc(0, 0, size * 1.7, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(239,243,221,.55)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(0, 0, size * (.95 + Math.sin(clock * 3 + phase) * .08), 0, Math.PI * 2); ctx.stroke();
+    // diamond body
     ctx.rotate(clock * .55);
-    ctx.shadowColor = '#65e4df'; ctx.shadowBlur = 17;
-    ctx.fillStyle = '#65e4df';
-    ctx.fillRect(-size * .47, -size * .47, size * .94, size * .94);
+    ctx.shadowColor = main; ctx.shadowBlur = 22;
+    ctx.fillStyle = main;
+    ctx.fillRect(-size * .5, -size * .5, size, size);
     ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#effcff'; ctx.lineWidth = 2;
+    ctx.strokeRect(-size * .5, -size * .5, size, size);
     ctx.fillStyle = '#eff3dd';
-    ctx.fillRect(-size * .18, -size * .18, size * .36, size * .36);
+    ctx.fillRect(-size * .2, -size * .2, size * .4, size * .4);
     ctx.restore();
+  }
+
+  // Free text placed by the level author.
+  for (const t of snap.texts) {
+    if (t.hidden) continue;
+    const tx = worldX(t.x);
+    if (tx > vw + 400 || tx < -600) continue;
+    drawText(ctx, t.text, tx, t.y, t.size, t.color);
   }
 
   // Exit gate.
@@ -320,7 +374,29 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
   for (const effect of snap.effects) {
     const life = Math.max(0, 1 - effect.age / Math.max(effect.duration, .001));
     const ex = worldX(effect.x);
-    if (effect.kind.toLowerCase().includes('dash')) {
+    if (effect.kind === 'tech') {
+      // Blue burst: expanding ring, a second echo ring and radial sparks.
+      const grow = 1 - life;
+      ctx.save();
+      ctx.shadowColor = '#3da9ff'; ctx.shadowBlur = 18;
+      ctx.globalAlpha = life * .9;
+      ctx.strokeStyle = '#59b9ff'; ctx.lineWidth = 3 + 5 * life;
+      ctx.beginPath(); ctx.arc(ex, effect.y, 12 + grow * 70, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = life * .6;
+      ctx.strokeStyle = '#bfe7ff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(ex, effect.y, 8 + grow * 44, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = life;
+      ctx.strokeStyle = '#8fd3ff'; ctx.lineWidth = 2;
+      for (let i = 0; i < 10; i++) {
+        const a = (i / 10) * Math.PI * 2 + Number(effect.id) * .3;
+        ctx.beginPath();
+        ctx.moveTo(ex + Math.cos(a) * (18 + grow * 40), effect.y + Math.sin(a) * (18 + grow * 40));
+        ctx.lineTo(ex + Math.cos(a) * (30 + grow * 70), effect.y + Math.sin(a) * (30 + grow * 70));
+        ctx.stroke();
+      }
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    } else if (effect.kind.toLowerCase().includes('dash')) {
       ctx.globalAlpha = life * .52;
       ctx.fillStyle = '#65e4df';
       ctx.fillRect(ex - 48, effect.y - 2, 48, 4);
@@ -348,6 +424,16 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
     }
   }
 
+  // Blue afterimages trail behind a successful Ground Jump / Slide Jump.
+  for (const ghost of snap.trail) {
+    const fade = Math.max(0, 1 - ghost.age / .42);
+    ctx.globalAlpha = fade * .38;
+    ctx.fillStyle = '#4db4ff';
+    roundedRect(ctx, worldX(ghost.x) + 3, ghost.y + 4, ghost.width - 6, ghost.height - 6, 4);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
   const px = worldX(player.x);
   const py = player.y;
   const pw = player.width;
@@ -365,7 +451,8 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
   ctx.rotate(lean);
   const bodyX = -pw / 2;
   const bodyY = -ph / 2;
-  ctx.fillStyle = player.slamming ? '#f2744f' : '#d8ddd0';
+  if (snap.techFlash > 0) { ctx.shadowColor = '#3da9ff'; ctx.shadowBlur = 10 + 26 * snap.techFlash; }
+  ctx.fillStyle = snap.techFlash > 0 ? '#9fdcff' : player.slamming ? '#f2744f' : '#d8ddd0';
   roundedRect(ctx, bodyX + pw * .12, bodyY + ph * .16, pw * .76, ph * .78, 4);
   ctx.fill();
   ctx.fillStyle = '#536365';
@@ -377,6 +464,15 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
   ctx.fillStyle = '#273234';
   ctx.fillRect(bodyX + pw * .15, bodyY + ph * .88, pw * .7, ph * .1);
   ctx.restore();
+
+  // Short blue flash around the screen edges confirms a technique was performed.
+  if (snap.techFlash > 0) {
+    const edge = ctx.createRadialGradient(vw / 2, vh / 2, vh * .35, vw / 2, vh / 2, vw * .62);
+    edge.addColorStop(0, 'rgba(61,169,255,0)');
+    edge.addColorStop(1, `rgba(61,169,255,${(.34 * snap.techFlash).toFixed(3)})`);
+    ctx.fillStyle = edge;
+    ctx.fillRect(0, 0, vw, vh);
+  }
 
   // Bottom edge glow / camera calibration ticks.
   ctx.fillStyle = 'rgba(101,228,223,.35)';
@@ -417,10 +513,37 @@ function App() {
   const [devDialog, setDevDialog] = useState<'closed' | 'enter' | 'leave'>('closed');
   const [devInput, setDevInput] = useState('');
   const [devError, setDevError] = useState(false);
-  const [dialog, setDialog] = useState<{ message: string; text?: string; resolve: (v: boolean) => void } | null>(null);
-  const askConfirm = useCallback((message: string) => new Promise<boolean>((resolve) => setDialog({ message, resolve })), []);
-  const showText = useCallback((message: string, text: string) => new Promise<boolean>((resolve) => setDialog({ message, text, resolve })), []);
-  const closeDialog = (value: boolean) => { dialog?.resolve(value); setDialog(null); };
+  const [dialog, setDialog] = useState<{ message: string; text?: string; input?: boolean; resolve: (v: boolean | string | null) => void } | null>(null);
+  const [dialogInput, setDialogInput] = useState('');
+  const askConfirm = useCallback((message: string) => new Promise<boolean>((resolve) => setDialog({ message, resolve: (v) => resolve(v === true) })), []);
+  const showText = useCallback((message: string, text: string) => new Promise<boolean>((resolve) => setDialog({ message, text, resolve: () => resolve(true) })), []);
+  const askText = useCallback((message: string, initial = '') => new Promise<string | null>((resolve) => {
+    setDialogInput(initial);
+    setDialog({ message, input: true, resolve: (v) => resolve(typeof v === 'string' ? v : null) });
+  }), []);
+  const closeDialog = (value: boolean | string | null) => { dialog?.resolve(value); setDialog(null); };
+  const dialogNode = dialog && (
+    <div className="sr-dev-dialog" role="dialog" aria-modal="true">
+      <div className="sr-dev-card">
+        <strong>{dialog.message}</strong>
+        {dialog.input && <textarea rows={3} autoFocus value={dialogInput} onChange={(e) => setDialogInput(e.target.value)} />}
+        {dialog.text !== undefined && <textarea readOnly rows={5} value={dialog.text} onFocus={(e) => e.currentTarget.select()} />}
+        <div>
+          {dialog.input ? (
+            <>
+              <button className="settings-trigger" onClick={() => closeDialog(dialogInput)}>OK</button>
+              <button className="settings-trigger" onClick={() => closeDialog(null)}>Отмена</button>
+            </>
+          ) : (
+            <>
+              <button className="settings-trigger" onClick={() => closeDialog(true)}>{dialog.text !== undefined ? 'Закрыть' : 'Да'}</button>
+              {dialog.text === undefined && <button className="settings-trigger" onClick={() => closeDialog(false)}>Нет</button>}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
   const [settingsReturnPage, setSettingsReturnPage] = useState<'title' | 'game'>('title');
   const [settingsTab, setSettingsTab] = useState<'controls' | 'audio' | 'video'>('controls');
   const [musicVolume, setMusicVolume] = useState(() => Number(localStorage.getItem('sr-music-volume') ?? 70));
@@ -775,7 +898,7 @@ function App() {
         <button className="sr-menu-button" onClick={() => window.alert('Чтобы выйти из игры, закройте вкладку браузера.')}>ВЫХОД</button>
       </nav>
       <div className="sr-rooftop"><div className="sr-robot"><i /><b /><span /></div></div>
-      <div className="sr-version" onClick={tapVersion}>v1.2.0{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
+      <div className="sr-version" onClick={tapVersion}>v1.3.0{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
       {devDialog !== 'closed' && (
         <div className="sr-dev-dialog" role="dialog" aria-modal="true">
           <div className="sr-dev-card">
@@ -808,19 +931,9 @@ function App() {
         onExit={() => setPage('title')}
         ask={askConfirm}
         show={showText}
+        input={askText}
       />
-      {dialog && (
-        <div className="sr-dev-dialog" role="dialog" aria-modal="true">
-          <div className="sr-dev-card">
-            <strong>{dialog.message}</strong>
-            {dialog.text !== undefined && <textarea readOnly rows={5} value={dialog.text} onFocus={(e) => e.currentTarget.select()} />}
-            <div>
-              <button className="settings-trigger" onClick={() => closeDialog(true)}>{dialog.text !== undefined ? 'Закрыть' : 'Да'}</button>
-              {dialog.text === undefined && <button className="settings-trigger" onClick={() => closeDialog(false)}>Нет</button>}
-            </div>
-          </div>
-        </div>
-      )}
+      {dialogNode}
     </>
   );
 
@@ -842,18 +955,7 @@ function App() {
     const removeFromStory = (id: string) => { setStoryOrder(order.filter((x) => x !== id)); setLevelsTick((n) => n + 1); };
     return (
       <main className="sr-levels-screen">
-        {dialog && (
-        <div className="sr-dev-dialog" role="dialog" aria-modal="true">
-          <div className="sr-dev-card">
-            <strong>{dialog.message}</strong>
-            {dialog.text !== undefined && <textarea readOnly rows={5} value={dialog.text} onFocus={(e) => e.currentTarget.select()} />}
-            <div>
-              <button className="settings-trigger" onClick={() => closeDialog(true)}>{dialog.text !== undefined ? 'Закрыть' : 'Да'}</button>
-              {dialog.text === undefined && <button className="settings-trigger" onClick={() => closeDialog(false)}>Нет</button>}
-            </div>
-          </div>
-        </div>
-      )}
+        {dialogNode}
         <div className="sr-levels-inner">
           <button className="settings-trigger" onClick={() => setPage('title')}>← В меню</button>
           <h2>ОПУБЛИКОВАННЫЕ УРОВНИ</h2>

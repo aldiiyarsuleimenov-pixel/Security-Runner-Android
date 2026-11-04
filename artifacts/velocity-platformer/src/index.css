@@ -632,3 +632,15 @@ button:focus-visible { outline: 2px solid #64e4df; outline-offset: 3px; }
 .ed-selcount { flex:0 0 auto; font-size:12px; color:#65e4df; align-self:center; padding-right:4px; }
 .ed-tool:disabled, .ed-bar .settings-trigger:disabled { opacity:.35; }
 .ed-foot { flex-wrap:nowrap; min-height:30px; }
+
+/* ---------- Editor v3: properties panel, triggers, swatches ---------- */
+.ed-page { position:fixed; }
+.ed-panel { position:absolute; left:0; right:0; bottom:34px; max-height:46vh; overflow:auto; background:#0f1a1c; border-top:2px solid #65e4df; padding:8px 10px; z-index:5; display:flex; flex-direction:column; gap:6px; }
+.ed-panel-head { display:flex; justify-content:space-between; align-items:center; }
+.ed-field { display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:12px; }
+.ed-field > span { min-width:92px; color:#9fb3aa; }
+.ed-field input, .ed-field textarea { flex:1 1 120px; min-width:80px; background:#172022; color:#fff; border:1px solid #2f4244; padding:6px; font:inherit; }
+.ed-hint { font-size:11px; opacity:.6; }
+.ed-swatches { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+.ed-swatch { width:28px; height:28px; border:2px solid rgba(255,255,255,.35); border-radius:4px; cursor:pointer; padding:0; }
+.ed-thumb { background-size:cover; background-position:center; width:34px; height:34px; }

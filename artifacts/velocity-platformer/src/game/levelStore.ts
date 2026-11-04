@@ -1,4 +1,4 @@
-import { BUNDLED_PUBLISHED, STORY_LEVELS, type LevelData } from "./levels";
+import { BUNDLED_PUBLISHED, STORY_LEVELS, normalizeLevel, pruneImages, type LevelData } from "./levels";
 
 const KEY_DRAFTS = "sr-custom-levels";
 const KEY_PUBLISHED = "sr-published-levels";
@@ -17,8 +17,8 @@ function read<T>(key: string, fallback: T): T {
     return fallback;
   }
 }
-function write(key: string, value: unknown) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage is optional */ }
+function write(key: string, value: unknown): boolean {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
 }
 
 export const isDevMode = () => read<boolean>(KEY_DEV, false);
@@ -26,23 +26,24 @@ export const setDevMode = (on: boolean) => write(KEY_DEV, on);
 export const isLevel1Done = () => read<boolean>(KEY_DONE, false);
 export const markLevel1Done = () => write(KEY_DONE, true);
 
-export const loadDrafts = () => read<LevelData[]>(KEY_DRAFTS, []);
-export function saveDraft(level: LevelData) {
+export const loadDrafts = () => read<LevelData[]>(KEY_DRAFTS, []).map(normalizeLevel);
+/** Returns false when the device storage is full (large images are the usual cause). */
+export function saveDraft(level: LevelData): boolean {
   const all = loadDrafts().filter((l) => l.id !== level.id);
-  write(KEY_DRAFTS, [...all, level]);
+  return write(KEY_DRAFTS, [...all, pruneImages(level)]);
 }
 export function deleteDraft(id: string) {
   write(KEY_DRAFTS, loadDrafts().filter((l) => l.id !== id));
 }
 
 export function loadPublished(): LevelData[] {
-  const local = read<LevelData[]>(KEY_PUBLISHED, []);
+  const local = read<LevelData[]>(KEY_PUBLISHED, []).map(normalizeLevel);
   const ids = new Set(local.map((l) => l.id));
-  return [...BUNDLED_PUBLISHED.filter((l) => !ids.has(l.id)), ...local];
+  return [...BUNDLED_PUBLISHED.map(normalizeLevel).filter((l) => !ids.has(l.id)), ...local];
 }
-export function publishLevel(level: LevelData) {
+export function publishLevel(level: LevelData): boolean {
   const local = read<LevelData[]>(KEY_PUBLISHED, []).filter((l) => l.id !== level.id);
-  write(KEY_PUBLISHED, [...local, level]);
+  return write(KEY_PUBLISHED, [...local, pruneImages(level)]);
 }
 export function unpublishLevel(id: string) {
   write(KEY_PUBLISHED, read<LevelData[]>(KEY_PUBLISHED, []).filter((l) => l.id !== id));

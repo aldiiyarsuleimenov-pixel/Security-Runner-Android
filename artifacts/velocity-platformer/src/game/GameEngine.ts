@@ -1,4 +1,4 @@
-import type { LevelData } from "./levels";
+import type { LevelData, LevelText, LevelTrigger } from "./levels";
 
 export interface GameInput {
   move: number;
@@ -8,7 +8,21 @@ export interface GameInput {
   groundSlam: boolean;
 }
 
-export interface GameRect {
+export interface MoveAnim { fx: number; fy: number; tx: number; ty: number; t: number; dur: number }
+export interface SpinAnim { from: number; t: number; dur: number }
+
+/** Runtime state that triggers can change on any level object. */
+export interface Dynamic {
+  group?: string;
+  color?: string;
+  hidden?: boolean;
+  mv?: MoveAnim;
+  /** Visual rotation in degrees that eases back to 0 after a rotate trigger. */
+  spin?: number;
+  spinAnim?: SpinAnim;
+}
+
+export interface GameRect extends Dynamic {
   id: string;
   x: number;
   y: number;
@@ -16,13 +30,15 @@ export interface GameRect {
   height: number;
   /** Spikes only: direction the teeth point (0 up, 1 right, 2 down, 3 left). */
   dir?: 0 | 1 | 2 | 3;
+  /** Platforms only: id of an image in the level's `images`. */
+  skin?: string;
 }
 
 export interface GamePlatform extends GameRect {
   kind: "ground" | "platform" | "block" | "half";
 }
 
-export interface GamePickup {
+export interface GamePickup extends Dynamic {
   id: string;
   x: number;
   y: number;
@@ -30,11 +46,23 @@ export interface GamePickup {
   collected: boolean;
 }
 
+export type GameText = LevelText & Dynamic;
+
+interface WorldCapture {
+  platforms: GamePlatform[];
+  spikes: GameRect[];
+  pickups: GamePickup[];
+  texts: GameText[];
+  fired: string[];
+}
+
+export interface TrailGhost { x: number; y: number; width: number; height: number; age: number }
+
 export interface GameEffect {
   id: number;
   x: number;
   y: number;
-  kind: "dash" | "slam" | "ground-jump" | "checkpoint" | "pickup" | "death" | "damage";
+  kind: "dash" | "slam" | "ground-jump" | "checkpoint" | "pickup" | "death" | "damage" | "tech";
   age: number;
   duration: number;
 }
@@ -63,6 +91,13 @@ export interface GameSnapshot {
   platforms: GamePlatform[];
   spikes: GameRect[];
   pickups: GamePickup[];
+  texts: GameText[];
+  bg?: string;
+  images: Record<string, string>;
+  /** 1 right after a successful technique (Ground Jump / Slide Jump), fading to 0. */
+  techFlash: number;
+  techKind: "ground" | "slide" | "";
+  trail: TrailGhost[];
   exit: GameRect;
   effects: GameEffect[];
   health: number;
@@ -90,6 +125,11 @@ const MAX_SLIDE_DURATION = 5;
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
 
+const ease = (k: number) => {
+  const c = Math.max(0, Math.min(1, k));
+  return c * c * (3 - 2 * c);
+};
+
 const overlaps = (
   ax: number,
   ay: number,
@@ -103,7 +143,18 @@ const overlaps = (
 
 export class GameEngine {
   private level: LevelData;
-  private solids: GamePlatform[] = [];
+  private platforms: GamePlatform[] = [];
+  private spikes: GameRect[] = [];
+  private texts: GameText[] = [];
+  private triggers: LevelTrigger[] = [];
+  private fired = new Set<string>();
+  private inside = new Set<string>();
+  private checkpointWorld: WorldCapture | null = null;
+  private techTimer = 0;
+  private techDuration = 0.5;
+  private techKind: "ground" | "slide" | "" = "";
+  private trail: TrailGhost[] = [];
+  private trailTimer = 0;
   private x = 0;
   private y = 0;
   private vx = 0;
@@ -171,6 +222,9 @@ export class GameEngine {
     this.dashRegenDelay = Math.max(0, this.dashRegenDelay - dt);
     this.slideJumpTimer = Math.max(0, this.slideJumpTimer - dt);
     this.slamJumpTimer = Math.max(0, this.slamJumpTimer - dt);
+    this.techTimer = Math.max(0, this.techTimer - dt);
+    this.updateWorld(dt);
+    this.updateTrail(dt);
     if (this.dashRegenDelay === 0) {
       this.dashEnergy = Math.min(MAX_DASH_ENERGY, this.dashEnergy + 26 * dt);
     }
@@ -211,21 +265,25 @@ export class GameEngine {
         this.setSliding(true);
       }
 
-      if (jumpPressed && (this.grounded || this.coyoteTimer > 0)) {
+      // Right after a slam the player bounces; pressing jump during that short window is a Ground Jump.
+      const slamWindow = this.slamJumpTimer > 0 && !this.slamming;
+      if (jumpPressed && (this.grounded || this.coyoteTimer > 0 || slamWindow)) {
         const jumpingOutOfSlide = this.sliding;
-        const boostedAfterSlam = this.grounded && this.slamJumpTimer > 0;
+        const boostedAfterSlam = slamWindow;
         if (this.sliding) this.setSliding(false);
         this.grounded = false;
         this.coyoteTimer = 0;
-        this.vy = boostedAfterSlam ? -790 : -690;
+        // A Ground Jump rises roughly twice as high as a normal jump so it reads at a glance.
+        this.vy = boostedAfterSlam ? -960 : -690;
         if (jumpingOutOfSlide) {
           // Preserve the slide's horizontal momentum through the jump.
           this.slideJumpTimer = 0.34;
           this.vx = clamp(this.vx, -520, 520);
+          if (!boostedAfterSlam) this.startTech("slide");
         }
         if (boostedAfterSlam) {
           this.slamJumpTimer = 0;
-          this.addEffect("ground-jump", this.x + this.width / 2, this.y + this.height, 0.5);
+          this.startTech("ground");
         }
         this.slamming = false;
       }
@@ -293,7 +351,7 @@ export class GameEngine {
       this.vy = -475;
       this.grounded = false;
       // A short input window allows a stronger follow-up jump after the slam bounce.
-      this.slamJumpTimer = 0.22;
+      this.slamJumpTimer = 0.3;
       this.addEffect("slam", this.x + this.width / 2, this.y + this.height, 0.58);
     }
 
@@ -305,7 +363,8 @@ export class GameEngine {
 
     const hitSpike =
       this.hitInvulnerability === 0 &&
-      this.level.spikes.some((spike) => {
+      this.spikes.some((spike) => {
+        if (spike.hidden) return false;
         const d = spike.dir ?? 0;
         const hx = d === 1 ? 0 : d === 3 ? 5 : 4;
         const hy = d === 0 ? 5 : d === 2 ? 0 : 4;
@@ -334,6 +393,7 @@ export class GameEngine {
     for (const pickup of this.pickups) {
       if (
         !pickup.collected &&
+        !pickup.hidden &&
         overlaps(
           this.x,
           this.y,
@@ -354,8 +414,11 @@ export class GameEngine {
     const checkpoint = this.level.checkpoint;
     if (checkpoint && this.checkpointX === 0 && this.x > checkpoint.x - 30) {
       this.checkpointX = checkpoint.x;
+      this.checkpointWorld = this.captureWorld();
       this.addEffect("checkpoint", checkpoint.x, checkpoint.y - 68, 0.8);
     }
+
+    this.updateTriggers();
 
     if (
       overlaps(
@@ -396,9 +459,15 @@ export class GameEngine {
       viewportHeight: VIEW_HEIGHT,
       worldWidth: this.level.worldWidth,
       worldHeight: VIEW_HEIGHT,
-      platforms: this.level.platforms,
-      spikes: this.level.spikes,
+      platforms: this.platforms,
+      spikes: this.spikes,
       pickups: this.pickups.map((pickup) => ({ ...pickup })),
+      texts: this.texts,
+      bg: this.level.bg,
+      images: this.level.images ?? {},
+      techFlash: this.techDuration > 0 ? this.techTimer / this.techDuration : 0,
+      techKind: this.techTimer > 0 ? this.techKind : "",
+      trail: this.trail.map((g) => ({ ...g })),
       exit: this.level.exit,
       effects: this.effects.map((effect) => ({ ...effect })),
       health: this.health,
@@ -426,7 +495,11 @@ export class GameEngine {
   }
 
   restart(): void {
-    this.solids = this.level.platforms.filter((p) => p.kind === "block" || p.kind === "half");
+    this.restoreWorld(null);
+    this.pickups = this.level.pickups.map((pickup) => ({ ...pickup, collected: false }));
+    this.checkpointWorld = null;
+    this.techTimer = 0;
+    this.trail = [];
     this.x = this.level.start.x;
     this.y = this.level.start.y - PLAYER_HEIGHT;
     this.vx = 0;
@@ -459,7 +532,6 @@ export class GameEngine {
     this.deaths = 0;
     this.complete = false;
     this.effects = [];
-    this.pickups = this.level.pickups.map((pickup) => ({ ...pickup, collected: false }));
   }
 
   private resolveLanding(previousBottom: number): boolean {
@@ -469,8 +541,9 @@ export class GameEngine {
     }
 
     const currentBottom = this.y + this.height;
-    const landing = this.level.platforms.find(
+    const landing = this.platforms.find(
       (platform) =>
+        !platform.hidden &&
         previousBottom <= platform.y + 2 &&
         currentBottom >= platform.y &&
         this.x + this.width > platform.x &&
@@ -489,8 +562,12 @@ export class GameEngine {
     return true;
   }
 
+  private solidList(): GamePlatform[] {
+    return this.platforms.filter((p) => !p.hidden && (p.kind === "block" || p.kind === "half"));
+  }
+
   private resolveSolidsX(previousX: number): void {
-    for (const s of this.solids) {
+    for (const s of this.solidList()) {
       if (!overlaps(this.x, this.y, this.width, this.height, s.x, s.y, s.width, s.height)) continue;
       if (previousX + this.width <= s.x + 0.01) this.x = s.x - this.width;
       else if (previousX >= s.x + s.width - 0.01) this.x = s.x + s.width;
@@ -501,7 +578,7 @@ export class GameEngine {
   }
 
   private resolveSolidsY(previousY: number): void {
-    for (const s of this.solids) {
+    for (const s of this.solidList()) {
       if (!overlaps(this.x, this.y, this.width, this.height, s.x, s.y, s.width, s.height)) continue;
       if (this.vy < 0 && previousY >= s.y + s.height - 1) {
         this.y = s.y + s.height;
@@ -565,6 +642,9 @@ export class GameEngine {
     this.previousGroundSlam = false;
     this.slideJumpTimer = 0;
     this.slamJumpTimer = 0;
+    this.restoreWorld(this.checkpointWorld);
+    this.techTimer = 0;
+    this.trail = [];
     this.cameraX = this.cameraTargetX();
     this.addEffect("death", this.x + this.width / 2, this.y + this.height / 2, 0.55);
   }
@@ -581,6 +661,164 @@ export class GameEngine {
     this.vx = direction * 900;
     this.vy = 0;
     this.addEffect("dash", this.x + this.width / 2, this.y + this.height / 2, 0.34);
+  }
+
+  // ---------- dynamic world: triggers, moving / rotating / hiding objects ----------
+
+  private startTech(kind: "ground" | "slide"): void {
+    this.techKind = kind;
+    this.techDuration = kind === "ground" ? 0.85 : 0.5;
+    this.techTimer = this.techDuration;
+    this.trailTimer = 0;
+    this.addEffect("tech", this.x + this.width / 2, this.y + this.height, kind === "ground" ? 0.7 : 0.5);
+  }
+
+  private updateTrail(dt: number): void {
+    this.trail = this.trail.map((g) => ({ ...g, age: g.age + dt })).filter((g) => g.age < 0.42);
+    if (this.techTimer > 0) {
+      this.trailTimer -= dt;
+      if (this.trailTimer <= 0) {
+        this.trailTimer = 0.035;
+        this.trail.push({ x: this.x, y: this.y, width: this.width, height: this.height, age: 0 });
+      }
+    }
+  }
+
+  private buildWorld(): WorldCapture {
+    return {
+      platforms: this.level.platforms.map((p) => ({ ...p })),
+      spikes: this.level.spikes.map((s) => ({ ...s })),
+      pickups: this.level.pickups.map((p) => ({ ...p, collected: false })),
+      texts: (this.level.texts ?? []).map((t) => ({ ...t })),
+      fired: [],
+    };
+  }
+
+  private captureWorld(): WorldCapture {
+    return JSON.parse(
+      JSON.stringify({
+        platforms: this.platforms,
+        spikes: this.spikes,
+        pickups: this.pickups,
+        texts: this.texts,
+        fired: [...this.fired],
+      }),
+    ) as WorldCapture;
+  }
+
+  /** Put every level object back to its initial state, or to the state it had at the checkpoint. */
+  private restoreWorld(from: WorldCapture | null): void {
+    const collected = new Map(this.pickups.map((p) => [p.id, p.collected]));
+    const base = from ? (JSON.parse(JSON.stringify(from)) as WorldCapture) : this.buildWorld();
+    this.platforms = base.platforms;
+    this.spikes = base.spikes;
+    this.texts = base.texts;
+    this.pickups = base.pickups.map((p) => ({ ...p, collected: collected.get(p.id) ?? false }));
+    this.triggers = this.level.triggers ?? [];
+    this.fired = new Set(base.fired);
+    this.inside = new Set();
+  }
+
+  private updateWorld(dt: number): void {
+    const ride = this.grounded
+      ? this.platforms.find(
+          (p) =>
+            !p.hidden &&
+            p.mv &&
+            Math.abs(this.y + this.height - p.y) <= 3 &&
+            this.x + this.width > p.x &&
+            this.x < p.x + p.width,
+        )
+      : undefined;
+    const all: Array<GameRect | GamePickup | GameText> = [...this.platforms, ...this.spikes, ...this.pickups, ...this.texts];
+    for (const o of all) {
+      if (o.mv) {
+        const ox = o.x;
+        const oy = o.y;
+        o.mv.t = Math.min(o.mv.dur, o.mv.t + dt);
+        const k = ease(o.mv.t / o.mv.dur);
+        o.x = o.mv.fx + (o.mv.tx - o.mv.fx) * k;
+        o.y = o.mv.fy + (o.mv.ty - o.mv.fy) * k;
+        if (o === ride) {
+          this.x += o.x - ox;
+          this.y += o.y - oy;
+        }
+        if (o.mv.t >= o.mv.dur) delete o.mv;
+      }
+      if (o.spinAnim) {
+        o.spinAnim.t = Math.min(o.spinAnim.dur, o.spinAnim.t + dt);
+        o.spin = o.spinAnim.from * (1 - ease(o.spinAnim.t / o.spinAnim.dur));
+        if (o.spinAnim.t >= o.spinAnim.dur) {
+          delete o.spinAnim;
+          delete o.spin;
+        }
+      }
+    }
+    // A moving or rotating block can end up inside the player: push out along the shortest way.
+    for (const s of this.solidList()) {
+      if (!overlaps(this.x, this.y, this.width, this.height, s.x, s.y, s.width, s.height)) continue;
+      const left = this.x + this.width - s.x;
+      const right = s.x + s.width - this.x;
+      const up = this.y + this.height - s.y;
+      const down = s.y + s.height - this.y;
+      const m = Math.min(left, right, up, down);
+      if (m === up) { this.y -= up; this.vy = Math.min(this.vy, 0); this.grounded = true; }
+      else if (m === down) { this.y += down; this.vy = Math.max(this.vy, 0); }
+      else if (m === left) { this.x -= left; this.vx = 0; }
+      else { this.x += right; this.vx = 0; }
+    }
+  }
+
+  private updateTriggers(): void {
+    for (const t of this.triggers) {
+      const inZone = overlaps(this.x, this.y, this.width, this.height, t.x, t.y, t.width, t.height);
+      const was = this.inside.has(t.id);
+      if (inZone && !was) {
+        this.inside.add(t.id);
+        if (!(t.once && this.fired.has(t.id))) {
+          this.fired.add(t.id);
+          this.fireTrigger(t);
+        }
+      } else if (!inZone && was) {
+        this.inside.delete(t.id);
+      }
+    }
+  }
+
+  private fireTrigger(t: LevelTrigger): void {
+    if (!t.target) return;
+    const dur = Math.max(0.05, t.duration || 0.5);
+    const hit = <T extends Dynamic>(list: T[]) => list.filter((o) => o.group === t.target);
+    const everything: Array<GameRect | GamePickup | GameText> = [
+      ...hit(this.platforms), ...hit(this.spikes), ...hit(this.pickups), ...hit(this.texts),
+    ];
+    if (t.action === "move") {
+      for (const o of everything) o.mv = { fx: o.x, fy: o.y, tx: o.x + t.dx, ty: o.y + t.dy, t: 0, dur };
+    } else if (t.action === "hide" || t.action === "show") {
+      for (const o of everything) o.hidden = t.action === "hide";
+    } else if (t.action === "color") {
+      for (const o of everything) o.color = (t.color || undefined) as string;
+    } else if (t.action === "rotate") {
+      for (const o of [...hit(this.platforms), ...hit(this.spikes)]) {
+        if ("kind" in o && o.kind === "ground") continue;
+        const cx = o.x + o.width / 2;
+        const cy = o.y + o.height / 2;
+        const oldX = o.x;
+        const oldY = o.y;
+        const w = o.width;
+        o.width = o.height;
+        o.height = w;
+        o.x = cx - o.width / 2;
+        o.y = cy - o.height / 2;
+        if (o.mv) {
+          o.mv.fx += o.x - oldX; o.mv.tx += o.x - oldX;
+          o.mv.fy += o.y - oldY; o.mv.ty += o.y - oldY;
+        }
+        if (!("kind" in o)) o.dir = (((o.dir ?? 0) + (t.angle > 0 ? 1 : 3)) % 4) as 0 | 1 | 2 | 3;
+        o.spinAnim = { from: -t.angle, t: 0, dur };
+        o.spin = -t.angle;
+      }
+    }
   }
 
   private addEffect(
