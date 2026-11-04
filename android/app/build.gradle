@@ -9,6 +9,8 @@ def keystoreFile = new File(buildDir, 'signing/security-runner.keystore')
 keystoreFile.parentFile.mkdirs()
 keystoreFile.bytes = java.util.Base64.getMimeDecoder().decode(file('security-runner.keystore.b64').text)
 
+def runNumber = Integer.parseInt(System.getenv('GITHUB_RUN_NUMBER') ?: '2')
+
 android {
     namespace 'com.securityrunner.game'
     compileSdk 35
@@ -27,7 +29,7 @@ android {
         minSdk 23
         targetSdk 35
         // GitHub Actions run number keeps growing, so each build counts as a newer version.
-        versionCode (System.getenv('GITHUB_RUN_NUMBER') ?: '2') as int
+        versionCode runNumber
         versionName '1.2.0'
     }
 }
