@@ -1,4 +1,5 @@
 import type { GamePlatform, GameRect } from "./GameEngine";
+import { BUNDLED_STORY } from "./bundledStory";
 
 export interface LevelPickup {
   id: string;
@@ -134,7 +135,7 @@ export const LEVEL_1: LevelData = {
 export const STORY_LEVELS: LevelData[] = [normalizeLevel(LEVEL_1)];
 
 /** Levels the developer published and bundled into the build (paste exported JSON here). */
-export const BUNDLED_PUBLISHED: LevelData[] = [];
+export const BUNDLED_PUBLISHED: LevelData[] = BUNDLED_STORY.levels as LevelData[];
 
 export function blankLevel(): LevelData {
   const id = `custom-${Date.now().toString(36)}`;

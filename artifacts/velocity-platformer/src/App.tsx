@@ -12,7 +12,7 @@ import Editor from './Editor';
 import { drawText, drawTiled, getImg, hashId, spinAround } from './game/draw';
 import { LEVEL_1, STORY_LEVELS, type LevelData } from './game/levels';
 import {
-  DEV_CODE, getStoryOrder, isDevMode, isLevel1Done, loadPublished, markLevel1Done, setDevMode,
+  DEV_CODE, exportStoryFile, getStoryOrder, isDevMode, isLevel1Done, loadPublished, markLevel1Done, setDevMode,
   setStoryOrder, storySequence, unpublishLevel,
 } from './game/levelStore';
 
@@ -973,6 +973,11 @@ function App() {
           {devMode && (
             <>
               <h2>ПОРЯДОК СЮЖЕТА</h2>
+              <button className="settings-trigger" onClick={async () => {
+                const text = exportStoryFile();
+                try { await navigator.clipboard.writeText(text); await showText('Сюжет скопирован. Вставьте его в файл bundledStory.ts:', text.slice(0, 400) + '…'); }
+                catch { await showText('Скопируйте весь текст и вставьте в bundledStory.ts:', text); }
+              }}>📋 Экспорт сюжета</button>
               {sequence.map((l, i) => (
                 <div className="ed-row" key={l.id}>
                   <span>{i + 1}. {l.name}{STORY_LEVELS.some((x) => x.id === l.id) ? ' (сюжетный)' : ''}</span>
