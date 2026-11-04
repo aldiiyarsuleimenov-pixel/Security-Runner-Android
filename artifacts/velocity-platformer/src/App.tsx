@@ -895,7 +895,7 @@ function App() {
         <button className="sr-menu-button" onClick={() => setPage('levels')}>УРОВНИ</button>
         {editorUnlocked && <button className="sr-menu-button" onClick={() => setPage('editor')}>РЕДАКТОР</button>}
         <button className="sr-menu-button" onClick={openSettings}>НАСТРОЙКИ</button>
-        <button className="sr-menu-button" onClick={() => window.alert('Чтобы выйти из игры, закройте вкладку браузера.')}>ВЫХОД</button>
+        <button className="sr-menu-button" onClick={() => { const d = (window as unknown as { srDesktop?: { quit: () => void } }).srDesktop; if (d) d.quit(); else window.alert('Чтобы выйти из игры, закройте вкладку браузера.'); }}>ВЫХОД</button>
       </nav>
       <div className="sr-rooftop"><div className="sr-robot"><i /><b /><span /></div></div>
       <div className="sr-version" onClick={tapVersion}>v1.3.0{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>

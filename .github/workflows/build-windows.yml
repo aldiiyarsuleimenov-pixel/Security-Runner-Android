@@ -1,0 +1,51 @@
+name: Build Security Runner Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'artifacts/velocity-platformer/**'
+      - 'desktop/**'
+      - '.github/workflows/build-windows.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install game dependencies
+        run: pnpm install --frozen-lockfile --filter "@workspace/velocity-platformer..."
+
+      - name: Build the game (relative paths so it works from a local file)
+        run: pnpm --filter @workspace/velocity-platformer run build
+        env:
+          PORT: '3000'
+          BASE_PATH: './'
+          NODE_ENV: production
+
+      - name: Copy the game into the desktop shell
+        shell: bash
+        run: |
+          rm -rf desktop/app
+          cp -r artifacts/velocity-platformer/dist/public desktop/app
+
+      - name: Package Windows .exe
+        working-directory: desktop
+        run: |
+          npm install
+          npx electron-builder --win portable --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Security-Runner-Windows
+          path: desktop/dist/*.exe
