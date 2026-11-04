@@ -722,7 +722,7 @@ export default function Editor({ level, onChange, onTest, onExit, ask, show, inp
   const doExport = async () => {
     const cur = levelRef.current;
     if (!cur) return;
-    try { await navigator.clipboard.writeText(JSON.stringify(cur)); flash('JSON уровня скопирован.'); }
+    try { await navigator.clipboard.writeText(JSON.stringify(cur)); flash('JSON ОДНОГО уровня скопирован. Для сюжета нужен «Экспорт сюжета» в меню «Уровни».'); }
     catch { void show('Скопируйте JSON уровня:', JSON.stringify(cur)); }
   };
   const changeWidth = (delta: number) => {

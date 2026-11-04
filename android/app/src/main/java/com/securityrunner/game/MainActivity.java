@@ -55,6 +55,7 @@ public class MainActivity extends Activity {
                 return assetLoader.shouldInterceptRequest(request.getUrl());
             }
         });
+        webView.addJavascriptInterface(new SrBridge(this), "srAndroid");
         webView.setWebChromeClient(new WebChromeClient() {
             // Lets <input type=file> open the system picker (used for block / background images in the editor).
             @Override

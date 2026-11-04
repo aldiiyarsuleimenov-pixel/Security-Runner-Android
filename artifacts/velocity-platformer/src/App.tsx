@@ -898,7 +898,7 @@ function App() {
         <button className="sr-menu-button" onClick={() => { const d = (window as unknown as { srDesktop?: { quit: () => void } }).srDesktop; if (d) d.quit(); else window.alert('Чтобы выйти из игры, закройте вкладку браузера.'); }}>ВЫХОД</button>
       </nav>
       <div className="sr-rooftop"><div className="sr-robot"><i /><b /><span /></div></div>
-      <div className="sr-version" onClick={tapVersion}>v1.3.0{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
+      <div className="sr-version" onClick={tapVersion}>v1.3.1{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
       {devDialog !== 'closed' && (
         <div className="sr-dev-dialog" role="dialog" aria-modal="true">
           <div className="sr-dev-card">
@@ -975,8 +975,22 @@ function App() {
               <h2>ПОРЯДОК СЮЖЕТА</h2>
               <button className="settings-trigger" onClick={async () => {
                 const text = exportStoryFile();
-                try { await navigator.clipboard.writeText(text); await showText('Сюжет скопирован. Вставьте его в файл bundledStory.ts:', text.slice(0, 400) + '…'); }
-                catch { await showText('Скопируйте весь текст и вставьте в bundledStory.ts:', text); }
+                const android = (window as unknown as { srAndroid?: { saveTextFile: (n: string, c: string) => string } }).srAndroid;
+                const info = `Размер: ${text.length} символов. Положите файл в папку game репозитория вместо старого bundledStory.json.`;
+                if (android && android.saveTextFile('bundledStory.json', text)) {
+                  await showText('Файл bundledStory.json сохранён в папку «Загрузки».', info);
+                  return;
+                }
+                try {
+                  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+                  const link = document.createElement('a');
+                  link.href = url; link.download = 'bundledStory.json';
+                  document.body.appendChild(link); link.click(); link.remove();
+                  window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+                  await showText('Файл bundledStory.json скачивается.', info);
+                } catch {
+                  await showText('Скопируйте весь текст и вставьте в bundledStory.json:', text);
+                }
               }}>📋 Экспорт сюжета</button>
               {sequence.map((l, i) => (
                 <div className="ed-row" key={l.id}>

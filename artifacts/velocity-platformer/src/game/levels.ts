@@ -1,5 +1,5 @@
 import type { GamePlatform, GameRect } from "./GameEngine";
-import { BUNDLED_STORY } from "./bundledStory";
+import bundledRaw from "./bundledStory.json";
 
 export interface LevelPickup {
   id: string;
@@ -135,7 +135,18 @@ export const LEVEL_1: LevelData = {
 export const STORY_LEVELS: LevelData[] = [normalizeLevel(LEVEL_1)];
 
 /** Levels the developer published and bundled into the build (paste exported JSON here). */
-export const BUNDLED_PUBLISHED: LevelData[] = BUNDLED_STORY.levels as LevelData[];
+/**
+ * Reads game/bundledStory.json. Normally it holds {"levels": [...], "order": [...]} from «Экспорт сюжета».
+ * If a single level (the editor's «JSON» button) was pasted by mistake, it is bundled and appended to the story.
+ */
+function readBundled(raw: unknown): { levels: LevelData[]; order: string[] } {
+  const r = raw as { levels?: LevelData[]; order?: string[]; platforms?: unknown; id?: string };
+  if (Array.isArray(r.levels)) return { levels: r.levels, order: Array.isArray(r.order) ? r.order : [] };
+  if (Array.isArray(r.platforms) && typeof r.id === "string") return { levels: [r as unknown as LevelData], order: [LEVEL_1.id, r.id] };
+  return { levels: [], order: [] };
+}
+export const BUNDLED_STORY = readBundled(bundledRaw);
+export const BUNDLED_PUBLISHED: LevelData[] = BUNDLED_STORY.levels;
 
 export function blankLevel(): LevelData {
   const id = `custom-${Date.now().toString(36)}`;
