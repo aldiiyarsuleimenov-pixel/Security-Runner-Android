@@ -20,6 +20,19 @@ export interface Dynamic {
   /** Visual rotation in degrees that eases back to 0 after a rotate trigger. */
   spin?: number;
   spinAnim?: SpinAnim;
+  /** Very fragile floor: seconds since the player stepped on it. */
+  crumbleT?: number;
+  /** Turret state (see updateTurrets). */
+  hp?: number;
+  tcd?: number;
+  aim?: number;
+  aimOn?: boolean;
+  locked?: boolean;
+  beam?: number;
+  beepT?: number;
+  pulse?: number;
+  flash?: number;
+  hitFlash?: number;
 }
 
 export interface GameRect extends Dynamic {
@@ -35,7 +48,7 @@ export interface GameRect extends Dynamic {
 }
 
 export interface GamePlatform extends GameRect {
-  kind: "ground" | "platform" | "block" | "half";
+  kind: "ground" | "platform" | "block" | "half" | "sbb" | "fragile" | "crumble" | "turret";
 }
 
 export interface GamePickup extends Dynamic {
@@ -62,7 +75,7 @@ export interface GameEffect {
   id: number;
   x: number;
   y: number;
-  kind: "dash" | "slam" | "ground-jump" | "checkpoint" | "pickup" | "death" | "damage" | "tech";
+  kind: "dash" | "slam" | "ground-jump" | "checkpoint" | "pickup" | "death" | "damage" | "tech" | "break";
   age: number;
   duration: number;
 }
@@ -125,6 +138,15 @@ const MAX_SLIDE_DURATION = 5;
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
 
+const TURRET_RANGE = 620;
+const TURRET_PERIOD = 3;
+const TURRET_LOCK = 0.3;
+const TURRET_HP = 6;
+const DASH_DAMAGE = 2; // 3 dashes destroy a turret
+const SLAM_DAMAGE = 3; // 2 ground slams destroy a turret
+const FRAGILE_IMPACT = 380; // landing faster than this (a jump onto it) breaks a fragile floor
+const CRUMBLE_DELAY = 1;
+
 const ease = (k: number) => {
   const c = Math.max(0, Math.min(1, k));
   return c * c * (3 - 2 * c);
@@ -155,6 +177,9 @@ export class GameEngine {
   private techKind: "ground" | "slide" | "" = "";
   private trail: TrailGhost[] = [];
   private trailTimer = 0;
+  private sounds: string[] = [];
+  private dashHits = new Set<string>();
+  private lastLand: { p: GamePlatform; vy: number } | null = null;
   private x = 0;
   private y = 0;
   private vx = 0;
@@ -344,6 +369,7 @@ export class GameEngine {
     this.y += this.vy * dt;
 
     const landed = this.resolveLanding(previousBottom);
+    if (landed) this.onLanded();
     this.resolveSolidsY(previousY);
     if (landed && this.slamming) {
       this.slamming = false;
@@ -389,6 +415,8 @@ export class GameEngine {
         return;
       }
     }
+
+    if (this.updateTurrets(dt)) return;
 
     for (const pickup of this.pickups) {
       if (
@@ -535,6 +563,7 @@ export class GameEngine {
   }
 
   private resolveLanding(previousBottom: number): boolean {
+    this.lastLand = null;
     if (this.vy < 0) {
       this.grounded = false;
       return false;
@@ -555,6 +584,7 @@ export class GameEngine {
       return false;
     }
 
+    this.lastLand = { p: landing, vy: this.vy };
     this.y = landing.y - this.height;
     this.vy = 0;
     this.grounded = true;
@@ -563,12 +593,21 @@ export class GameEngine {
   }
 
   private solidList(): GamePlatform[] {
-    return this.platforms.filter((p) => !p.hidden && (p.kind === "block" || p.kind === "half"));
+    return this.platforms.filter(
+      (p) => !p.hidden && (p.kind === "block" || p.kind === "half" || p.kind === "sbb" || p.kind === "turret"),
+    );
   }
 
   private resolveSolidsX(previousX: number): void {
     for (const s of this.solidList()) {
       if (!overlaps(this.x, this.y, this.width, this.height, s.x, s.y, s.width, s.height)) continue;
+      // A dash smashes through green SBB walls and chips turrets.
+      if (s.kind === "sbb" && this.dashing) { this.breakPlatform(s); continue; }
+      if (s.kind === "turret" && this.dashing && !this.dashHits.has(s.id)) {
+        this.dashHits.add(s.id);
+        this.damageTurret(s, DASH_DAMAGE);
+        if (s.hidden) continue;
+      }
       if (previousX + this.width <= s.x + 0.01) this.x = s.x - this.width;
       else if (previousX >= s.x + s.width - 0.01) this.x = s.x + s.width;
       else continue; // already inside vertically-resolved overlap; Y pass handles it
@@ -653,6 +692,7 @@ export class GameEngine {
     this.facing = direction;
     this.controlsLocked = false;
     this.dashing = true;
+    this.dashHits.clear();
     this.slamming = false;
     this.dashTimer = 0.16;
     this.dashCooldown = 0.62;
@@ -670,7 +710,137 @@ export class GameEngine {
     this.techDuration = kind === "ground" ? 0.85 : 0.5;
     this.techTimer = this.techDuration;
     this.trailTimer = 0;
+    this.sound("tech");
     this.addEffect("tech", this.x + this.width / 2, this.y + this.height, kind === "ground" ? 0.7 : 0.5);
+  }
+
+  drainSounds(): string[] {
+    const out = this.sounds;
+    this.sounds = [];
+    return out;
+  }
+
+  private sound(name: string): void {
+    if (this.sounds.length < 16) this.sounds.push(name);
+  }
+
+  private breakPlatform(p: GamePlatform): void {
+    p.hidden = true;
+    this.sound("break");
+    this.addEffect("break", p.x + p.width / 2, p.y + p.height / 2, 0.55);
+  }
+
+  private damageTurret(t: GamePlatform, amount: number): void {
+    t.hp = (t.hp ?? TURRET_HP) - amount;
+    t.hitFlash = 0.18;
+    this.sound("hit");
+    if (t.hp <= 0) this.breakPlatform(t);
+  }
+
+  /** Called every frame the player rests on a platform; `lastLand.vy` is the speed of the touchdown. */
+  private onLanded(): void {
+    const land = this.lastLand;
+    if (!land) return;
+    const p = land.p;
+    if (p.kind === "fragile" && (this.slamming || land.vy >= FRAGILE_IMPACT)) {
+      this.breakPlatform(p);
+    } else if (p.kind === "crumble" && p.crumbleT === undefined) {
+      p.crumbleT = 0;
+      this.sound("crack");
+    } else if (p.kind === "turret" && this.slamming) {
+      this.damageTurret(p, SLAM_DAMAGE);
+    }
+  }
+
+  /** Distance along a ray (unit direction) to a rectangle, or null if it is not hit within maxLen. */
+  private rayRect(ox: number, oy: number, ux: number, uy: number, maxLen: number, rx: number, ry: number, rw: number, rh: number): number | null {
+    let tmin = 0;
+    let tmax = maxLen;
+    const axes: Array<[number, number, number, number]> = [[ox, ux, rx, rx + rw], [oy, uy, ry, ry + rh]];
+    for (const [o, d, lo, hi] of axes) {
+      if (Math.abs(d) < 1e-9) {
+        if (o < lo || o > hi) return null;
+      } else {
+        let t1 = (lo - o) / d;
+        let t2 = (hi - o) / d;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        tmin = Math.max(tmin, t1);
+        tmax = Math.min(tmax, t2);
+        if (tmin > tmax) return null;
+      }
+    }
+    return tmin;
+  }
+
+  /** How far a laser from (ox, oy) travels before something solid stops it. */
+  private rayDistance(ox: number, oy: number, dx: number, dy: number, maxLen: number, exclude: GamePlatform): number {
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    let best = maxLen;
+    for (const p of this.platforms) {
+      if (p === exclude || p.hidden) continue;
+      const t = this.rayRect(ox, oy, ux, uy, best, p.x, p.y, p.width, p.height);
+      if (t !== null && t < best) best = t;
+    }
+    return best;
+  }
+
+  /**
+   * Turrets: every 3 s they track the player (beeping, with an aim line). During the last 0.3 s the line
+   * freezes, then they fire along it. Returns true when the player was killed.
+   */
+  private updateTurrets(dt: number): boolean {
+    const px = this.x + this.width / 2;
+    const py = this.y + this.height / 2;
+    for (const t of this.platforms) {
+      if (t.kind !== "turret" || t.hidden) continue;
+      const cx = t.x + t.width / 2;
+      const cy = t.y + t.height / 2;
+      const dx = px - cx;
+      const dy = py - cy;
+      const dist = Math.hypot(dx, dy);
+      if (!t.locked) {
+        const seen = dist <= TURRET_RANGE && this.rayDistance(cx, cy, dx, dy, dist, t) >= dist - 1;
+        if (!seen) { t.tcd = 0; t.aimOn = false; t.beepT = 0; continue; }
+        t.aimOn = true;
+        t.aim = Math.atan2(dy, dx);
+      }
+      const before = t.tcd ?? 0;
+      t.tcd = before + dt;
+      if (!t.locked) {
+        t.beepT = (t.beepT ?? 0) - dt;
+        if (t.beepT <= 0) {
+          this.sound("beep");
+          t.pulse = 0.09;
+          // The closer to the shot, the faster it beeps.
+          t.beepT = 0.55 - 0.4 * Math.min(1, t.tcd / (TURRET_PERIOD - TURRET_LOCK));
+        }
+        if (t.tcd >= TURRET_PERIOD - TURRET_LOCK) {
+          t.locked = true;
+          this.sound("lock");
+        }
+      }
+      const ang = t.aim ?? 0;
+      const ux = Math.cos(ang);
+      const uy = Math.sin(ang);
+      t.beam = this.rayDistance(cx, cy, ux, uy, TURRET_RANGE * 1.25, t);
+      if (t.tcd >= TURRET_PERIOD) {
+        const hit = this.rayRect(cx, cy, ux, uy, t.beam, this.x - 3, this.y - 3, this.width + 6, this.height + 6);
+        t.flash = 0.22;
+        t.tcd = 0;
+        t.locked = false;
+        t.aimOn = false;
+        t.beepT = 0;
+        this.sound("shot");
+        if (hit !== null) {
+          this.health = 0;
+          this.respawn();
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private updateTrail(dt: number): void {
@@ -686,7 +856,7 @@ export class GameEngine {
 
   private buildWorld(): WorldCapture {
     return {
-      platforms: this.level.platforms.map((p) => ({ ...p })),
+      platforms: this.level.platforms.map((p) => ({ ...p, hp: p.kind === "turret" ? TURRET_HP : undefined })),
       spikes: this.level.spikes.map((s) => ({ ...s })),
       pickups: this.level.pickups.map((p) => ({ ...p, collected: false })),
       texts: (this.level.texts ?? []).map((t) => ({ ...t })),
@@ -711,6 +881,10 @@ export class GameEngine {
     const collected = new Map(this.pickups.map((p) => [p.id, p.collected]));
     const base = from ? (JSON.parse(JSON.stringify(from)) as WorldCapture) : this.buildWorld();
     this.platforms = base.platforms;
+    for (const p of this.platforms) {
+      // Timers of half-finished crumbling or aiming never carry over a respawn.
+      delete p.crumbleT; delete p.tcd; delete p.aimOn; delete p.locked; delete p.beam; delete p.beepT; delete p.pulse; delete p.flash;
+    }
     this.spikes = base.spikes;
     this.texts = base.texts;
     this.pickups = base.pickups.map((p) => ({ ...p, collected: collected.get(p.id) ?? false }));
@@ -753,6 +927,15 @@ export class GameEngine {
           delete o.spin;
         }
       }
+    }
+    for (const p of this.platforms) {
+      if (p.kind === "crumble" && !p.hidden && p.crumbleT !== undefined) {
+        p.crumbleT += dt;
+        if (p.crumbleT >= CRUMBLE_DELAY) this.breakPlatform(p);
+      }
+      if (p.hitFlash) p.hitFlash = Math.max(0, p.hitFlash - dt);
+      if (p.pulse) p.pulse = Math.max(0, p.pulse - dt);
+      if (p.flash) p.flash = Math.max(0, p.flash - dt);
     }
     // A moving or rotating block can end up inside the player: push out along the shortest way.
     for (const s of this.solidList()) {

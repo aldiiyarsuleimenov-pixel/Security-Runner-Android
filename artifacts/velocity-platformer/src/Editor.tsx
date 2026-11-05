@@ -5,7 +5,7 @@ import { drawText, drawTiled, getImg, textBox } from './game/draw';
 import EditorPanel from './EditorPanel';
 import { deleteDraft, loadDrafts, publishLevel, saveDraft } from './game/levelStore';
 
-type Tool = 'hand' | 'select' | 'block' | 'half' | 'platform' | 'ground' | 'spike' | 'pickup' | 'trigger' | 'text' | 'start' | 'checkpoint' | 'exit' | 'erase';
+type Tool = 'hand' | 'select' | 'block' | 'half' | 'platform' | 'ground' | 'sbb' | 'fragile' | 'crumble' | 'turret' | 'spike' | 'pickup' | 'trigger' | 'text' | 'start' | 'checkpoint' | 'exit' | 'erase';
 type Rot = 0 | 1 | 2 | 3;
 
 const TOOLS: Array<{ id: Tool; label: string }> = [
@@ -15,6 +15,10 @@ const TOOLS: Array<{ id: Tool; label: string }> = [
   { id: 'half', label: '▬ Полублок' },
   { id: 'platform', label: '═ Платформа' },
   { id: 'ground', label: '▓ Земля' },
+  { id: 'sbb', label: '▮ СББ' },
+  { id: 'fragile', label: '▒ Хрупкий пол' },
+  { id: 'crumble', label: '░ Очень хрупкий' },
+  { id: 'turret', label: '⌖ Турель' },
   { id: 'spike', label: '▲ Шип' },
   { id: 'pickup', label: '◆ Осколок' },
   { id: 'trigger', label: '⚡ Триггер' },
@@ -116,9 +120,11 @@ interface Props {
   ask: (message: string) => Promise<boolean>;
   show: (message: string, text: string) => Promise<boolean>;
   input: (message: string, initial?: string) => Promise<string | null>;
+  /** Developer mode: only developers can publish levels. */
+  isDev: boolean;
 }
 
-export default function Editor({ level, onChange, onTest, onExit, ask, show, input }: Props) {
+export default function Editor({ level, onChange, onTest, onExit, ask, show, input, isDev }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levelRef = useRef<LevelData | null>(level);
   const synced = useRef<LevelData | null>(level);
@@ -320,6 +326,10 @@ export default function Editor({ level, onChange, onTest, onExit, ask, show, inp
       case 'half': addPlatform('half', GRID * 2, GRID); break;
       case 'platform': addPlatform('platform', GRID * 4, GRID); break;
       case 'ground': addPlatform('ground', GRID * 4, GRID); break;
+      case 'sbb': addPlatform('sbb', GRID, GRID * 4); break;
+      case 'fragile': addPlatform('fragile', GRID * 4, GRID); break;
+      case 'crumble': addPlatform('crumble', GRID * 4, GRID); break;
+      case 'turret': addPlatform('turret', GRID * 2, GRID * 2); break;
       case 'spike': {
         const w = odd ? GRID : GRID * 2;
         const h = odd ? GRID * 2 : GRID;
@@ -567,7 +577,8 @@ export default function Editor({ level, onChange, onTest, onExit, ask, show, inp
       for (let gx = gx0; gx <= gx1; gx += GRID) { ctx.moveTo(gx, 0); ctx.lineTo(gx, VIEW_H); }
       for (let gy = FLOOR_Y - Math.ceil(FLOOR_Y / GRID) * GRID; gy <= VIEW_H; gy += GRID) { ctx.moveTo(0, gy); ctx.lineTo(lvl.worldWidth, gy); }
       ctx.stroke();
-      const fills: Record<GamePlatform['kind'], string> = { ground: '#2b3537', platform: '#41605f', block: '#5b6b6e', half: '#6a7e75' };
+      const fills: Record<GamePlatform['kind'], string> = { ground: '#2b3537', platform: '#41605f', block: '#5b6b6e', half: '#6a7e75', sbb: 'rgba(48,255,128,.35)', fragile: '#8a989b', crumble: '#8d7466', turret: '#243033' };
+      const labels: Partial<Record<GamePlatform['kind'], string>> = { sbb: 'СББ', fragile: 'ХРУП', crumble: 'ОЧ.ХРУП', turret: 'ТУР' };
       for (const p of lvl.platforms) {
         if (p.x + p.width < v.x || p.x > v.x + vw) continue;
         const skin = getImg(p.skin ? lvl.images?.[p.skin] : undefined);
@@ -580,9 +591,20 @@ export default function Editor({ level, onChange, onTest, onExit, ask, show, inp
           ctx.fillStyle = '#9fb3aa';
           ctx.fillRect(p.x, p.y, p.width, Math.min(3, p.height));
         }
-        ctx.strokeStyle = 'rgba(0,0,0,.35)';
+        ctx.strokeStyle = p.kind === 'sbb' ? '#4dff9a' : 'rgba(0,0,0,.35)';
         ctx.lineWidth = 1 / k;
         ctx.strokeRect(p.x + .5 / k, p.y + .5 / k, p.width - 1 / k, Math.min(p.height, 200) - 1 / k);
+        const tag = labels[p.kind];
+        if (tag) {
+          ctx.save();
+          ctx.fillStyle = p.kind === 'sbb' ? '#d2ffe3' : '#eef3ee';
+          ctx.font = `bold ${9 / k}px sans-serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.translate(p.x + p.width / 2, p.y + Math.min(p.height, 200) / 2);
+          if (p.height > p.width) ctx.rotate(-Math.PI / 2);
+          ctx.fillText(tag, 0, 0);
+          ctx.restore();
+        }
       }
       for (const sp of lvl.spikes) { if (sp.x + sp.width >= v.x && sp.x <= v.x + vw) drawSpike(ctx, sp); }
       for (const pk of lvl.pickups) {
@@ -792,7 +814,7 @@ export default function Editor({ level, onChange, onTest, onExit, ask, show, inp
       {menuOpen && (
         <div className="ed-menu">
           <button className="settings-trigger" onClick={doSave}>Сохранить</button>
-          <button className="settings-trigger" onClick={doPublish}>Опубликовать</button>
+          {isDev && <button className="settings-trigger" onClick={doPublish}>Опубликовать</button>}
           <button className="settings-trigger" onClick={doExport}>JSON</button>
           <button className="settings-trigger" onClick={selectAll}>Выбрать всё</button>
           <button className="settings-trigger" onClick={() => pickImage('bg')}>Фон: выбрать</button>

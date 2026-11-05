@@ -10,9 +10,10 @@ import {
 import { GameEngine } from './game/GameEngine';
 import Editor from './Editor';
 import { drawText, drawTiled, getImg, hashId, spinAround } from './game/draw';
+import { playSound } from './game/audio';
 import { LEVEL_1, STORY_LEVELS, type LevelData } from './game/levels';
 import {
-  DEV_CODE, exportStoryFile, getStoryOrder, isDevMode, isLevel1Done, loadPublished, markLevel1Done, setDevMode,
+  DEV_CODE, exportStoryFile, getStoryOrder, loadDrafts, isDevMode, isLevel1Done, loadPublished, markLevel1Done, setDevMode,
   setStoryOrder, storySequence, unpublishLevel,
 } from './game/levelStore';
 
@@ -26,7 +27,11 @@ type InputState = {
   groundSlam: boolean;
 };
 
-type Rect = { id: string | number; x: number; y: number; width: number; height: number; kind?: string; dir?: 0 | 1 | 2 | 3; skin?: string; color?: string; hidden?: boolean; spin?: number };
+type Rect = {
+  id: string | number; x: number; y: number; width: number; height: number; kind?: string; dir?: 0 | 1 | 2 | 3;
+  skin?: string; color?: string; hidden?: boolean; spin?: number;
+  crumbleT?: number; hp?: number; aim?: number; aimOn?: boolean; locked?: boolean; beam?: number; pulse?: number; flash?: number; hitFlash?: number;
+};
 type Snapshot = {
   player: {
     x: number; y: number; vx: number; vy: number; width: number; height: number;
@@ -152,6 +157,90 @@ function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: num
   ctx.closePath();
 }
 
+/** Green translucent security wall (СББ): breaks when the player dashes into it. */
+function drawSbb(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, clock: number, seed: number) {
+  const pulse = .5 + .5 * Math.sin(clock * 3 + seed);
+  ctx.fillStyle = `rgba(48,255,128,${(.2 + .1 * pulse).toFixed(3)})`;
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = 'rgba(190,255,215,.16)';
+  for (let sy = y + ((clock * 14) % 8); sy < y + h; sy += 8) ctx.fillRect(x, sy, w, 1.5);
+  ctx.strokeStyle = `rgba(90,255,160,${(.75 + .25 * pulse).toFixed(3)})`;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+  if (Math.max(w, h) >= 44) {
+    ctx.save();
+    ctx.translate(x + w / 2, y + h / 2);
+    if (h > w) ctx.rotate(-Math.PI / 2);
+    ctx.fillStyle = 'rgba(205,255,225,.85)';
+    ctx.font = '700 10px "IBM Plex Mono", monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('СББ', 0, 0);
+    ctx.restore();
+  }
+}
+
+/** Iron floor tile. `crumbleT` (seconds since stepped on) makes the very fragile kind shake, crack and glow red. */
+function drawIron(ctx: CanvasRenderingContext2D, x0: number, y: number, w: number, h: number, kind: 'fragile' | 'crumble', crumbleT: number | undefined, clock: number) {
+  const t = crumbleT ?? 0;
+  const shake = crumbleT !== undefined ? Math.sin(clock * 90) * (1 + 3 * t) : 0;
+  const x = x0 + shake;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, kind === 'crumble' ? '#9a8478' : '#a7b2b4');
+  g.addColorStop(1, kind === 'crumble' ? '#5b4a43' : '#5c696c');
+  ctx.fillStyle = g;
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = 'rgba(255,255,255,.35)';
+  ctx.fillRect(x, y, w, 2);
+  ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 1;
+  for (let px = x + 24; px < x + w - 1; px += 24) { ctx.beginPath(); ctx.moveTo(px, y + 1); ctx.lineTo(px, y + h); ctx.stroke(); }
+  ctx.fillStyle = 'rgba(20,26,28,.7)';
+  for (let px = x + 6; px < x + w - 3; px += 24) { ctx.fillRect(px, y + h / 2 - 1, 3, 3); }
+  if (kind === 'crumble') {
+    ctx.fillStyle = 'rgba(240,150,60,.55)';
+    for (let px = x; px < x + w; px += 14) { ctx.beginPath(); ctx.moveTo(px, y + h); ctx.lineTo(px + 7, y + h); ctx.lineTo(px + 14, y + h - 5); ctx.lineTo(px + 7, y + h - 5); ctx.fill(); }
+  }
+  // cracks: a single one on fragile floors, more of them as a crumbling floor is about to give way
+  ctx.strokeStyle = 'rgba(12,16,17,.85)'; ctx.lineWidth = 1.6;
+  const cracks = kind === 'crumble' ? 1 + Math.floor(t * 4) : 1;
+  for (let i = 0; i < cracks; i++) {
+    const cx = x + w * (0.25 + 0.5 * ((i * 0.37) % 1));
+    ctx.beginPath(); ctx.moveTo(cx, y); ctx.lineTo(cx + 3, y + h * .35); ctx.lineTo(cx - 2, y + h * .65); ctx.lineTo(cx + 4, y + h); ctx.stroke();
+  }
+  if (crumbleT !== undefined && t > .6) {
+    ctx.fillStyle = `rgba(255,70,40,${(((t - .6) / .4) * (.35 + .25 * Math.sin(clock * 40))).toFixed(3)})`;
+    ctx.fillRect(x, y, w, h);
+  }
+}
+
+/** Turret body with a barrel that follows the locked-on target. */
+function drawTurret(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, t: Rect, clock: number) {
+  const cx = x + w / 2, cy = y + h / 2;
+  ctx.fillStyle = '#243033';
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#3b4b4f';
+  ctx.fillRect(x, y, w, 4);
+  ctx.strokeStyle = '#0d1213'; ctx.lineWidth = 2;
+  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(t.aim ?? -Math.PI / 2);
+  ctx.fillStyle = t.locked ? '#ff5a3d' : '#6c7f84';
+  ctx.fillRect(2, -4, w * .62, 8);
+  ctx.restore();
+  ctx.fillStyle = '#10181a';
+  ctx.beginPath(); ctx.arc(cx, cy, 9, 0, Math.PI * 2); ctx.fill();
+  const lit = t.aimOn || (t.flash ?? 0) > 0;
+  ctx.fillStyle = lit ? (t.locked ? '#ffffff' : '#ff3d2e') : '#4a5558';
+  if (lit && !t.locked && !(t.pulse && t.pulse > 0)) ctx.fillStyle = '#7a2a24';
+  ctx.beginPath(); ctx.arc(cx, cy, 4.5, 0, Math.PI * 2); ctx.fill();
+  const hp = t.hp ?? 6;
+  if (hp < 6) {
+    ctx.fillStyle = 'rgba(8,12,13,.8)'; ctx.fillRect(x, y - 9, w, 6);
+    ctx.fillStyle = '#ff7a59'; ctx.fillRect(x + 1, y - 8, (w - 2) * (hp / 6), 4);
+  }
+  if (t.hitFlash && t.hitFlash > 0) { ctx.fillStyle = `rgba(255,255,255,${Math.min(.8, t.hitFlash * 5).toFixed(2)})`; ctx.fillRect(x, y, w, h); }
+}
+
 function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
   const bounds = canvas.getBoundingClientRect();
   if (!bounds.width || !bounds.height || !snap.viewportWidth || !snap.viewportHeight) return;
@@ -254,6 +343,9 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
     if (x + platform.width < -100 || x > vw + 100) continue;
     ctx.save();
     spinAround(ctx, x, platform.y, platform.width, platform.height, platform.spin);
+    if (platform.kind === 'sbb') { drawSbb(ctx, x, platform.y, platform.width, platform.height, clock, hashId(platform.id)); ctx.restore(); continue; }
+    if (platform.kind === 'fragile' || platform.kind === 'crumble') { drawIron(ctx, x, platform.y, platform.width, platform.height, platform.kind, platform.crumbleT, clock); ctx.restore(); continue; }
+    if (platform.kind === 'turret') { drawTurret(ctx, x, platform.y, platform.width, platform.height, platform, clock); ctx.restore(); continue; }
     const skin = getImg(platform.skin ? snap.images[platform.skin] : undefined);
     const isSolid = platform.kind === 'block' || platform.kind === 'half';
     if (skin) {
@@ -279,6 +371,42 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
       }
     }
     ctx.restore();
+  }
+
+  // Turret aim lines: dashed while tracking (blinks with each beep), solid once locked, a thick flash on firing.
+  for (const t of snap.platforms) {
+    if (t.kind !== 'turret' || t.hidden) continue;
+    const ang = t.aim ?? 0;
+    const len = t.beam ?? 0;
+    if (len <= 0) continue;
+    const bx = worldX(t.x + t.width / 2);
+    const by = t.y + t.height / 2;
+    const ex2 = bx + Math.cos(ang) * len;
+    const ey2 = by + Math.sin(ang) * len;
+    if ((t.flash ?? 0) > 0) {
+      const f = (t.flash ?? 0) / .22;
+      ctx.save();
+      ctx.shadowColor = '#ff6a3d'; ctx.shadowBlur = 24;
+      ctx.strokeStyle = `rgba(255,245,230,${f.toFixed(2)})`; ctx.lineWidth = 3 + 9 * f;
+      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ex2, ey2); ctx.stroke();
+      ctx.restore();
+    } else if (t.aimOn) {
+      ctx.save();
+      const beep = (t.pulse ?? 0) > 0;
+      if (t.locked) {
+        ctx.shadowColor = '#ff3d2e'; ctx.shadowBlur = 14;
+        ctx.strokeStyle = '#ff5a3d'; ctx.lineWidth = 3;
+      } else {
+        ctx.setLineDash([10, 9]); ctx.lineDashOffset = -clock * 40;
+        ctx.strokeStyle = beep ? 'rgba(255,90,60,.95)' : 'rgba(255,90,60,.38)';
+        ctx.lineWidth = beep ? 2.6 : 1.4;
+      }
+      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ex2, ey2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = t.locked ? '#ffffff' : 'rgba(255,90,60,.8)';
+      ctx.beginPath(); ctx.arc(ex2, ey2, t.locked ? 4.5 : 3, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
   }
 
   // Hazard teeth are high-contrast silhouettes with a hot warning edge.
@@ -374,7 +502,24 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
   for (const effect of snap.effects) {
     const life = Math.max(0, 1 - effect.age / Math.max(effect.duration, .001));
     const ex = worldX(effect.x);
-    if (effect.kind === 'tech') {
+    if (effect.kind === 'break') {
+      const grow = 1 - life;
+      ctx.save();
+      ctx.globalAlpha = life;
+      for (let i = 0; i < 9; i++) {
+        const a = (i / 9) * Math.PI * 2 + Number(effect.id) * .7;
+        const sp = 40 + (i % 3) * 22;
+        const dx2 = Math.cos(a) * sp * grow;
+        const dy2 = Math.sin(a) * sp * grow + 160 * grow * grow;
+        ctx.fillStyle = i % 2 ? '#9aa6a8' : '#e0864f';
+        ctx.save();
+        ctx.translate(ex + dx2, effect.y + dy2);
+        ctx.rotate(grow * 6 + i);
+        ctx.fillRect(-4, -3, 8, 6);
+        ctx.restore();
+      }
+      ctx.restore();
+    } else if (effect.kind === 'tech') {
       // Blue burst: expanding ring, a second echo ring and radial sparks.
       const grow = 1 - life;
       ctx.save();
@@ -501,10 +646,12 @@ function App() {
   const [activeTouches, setActiveTouches] = useState<Set<string>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [page, setPage] = useState<'title' | 'settings' | 'game' | 'levels' | 'editor'>('title');
+  const pageRef = useRef<string>('title');
   const currentLevelRef = useRef<LevelData>(LEVEL_1);
   const [currentLevel, setCurrentLevel] = useState<LevelData>(LEVEL_1);
   const [playMode, setPlayMode] = useState<PlayMode>({ kind: 'story', index: 0 });
   const [editing, setEditing] = useState<LevelData | null>(null);
+  pageRef.current = page;
   const [devMode, setDevModeState] = useState(() => isDevMode());
   const [level1Done, setLevel1Done] = useState(() => isLevel1Done());
   const [levelsTick, setLevelsTick] = useState(0);
@@ -617,7 +764,13 @@ function App() {
         const bounds = canvas.getBoundingClientRect();
         engine.setViewportAspectRatio(bounds.width / Math.max(bounds.height, 1));
       }
-      engine.step(input, dt);
+      // Only the game screen advances the simulation (turrets must not shoot while you edit or browse menus).
+      if (pageRef.current === 'game') {
+        engine.step(input, dt);
+        for (const name of engine.drainSounds()) playSound(name);
+      } else {
+        engine.drainSounds();
+      }
       const snap = engine.getSnapshot() as Snapshot;
       if (canvas) drawArena(canvas, snap, now / 1000);
       if (now - lastHud > 110) {
@@ -861,7 +1014,7 @@ function App() {
     if (next) startLevel(next, { kind: 'story', index: playMode.index + 1 });
   };
   const hasNextStory = playMode.kind === 'story' && !!storySequence()[playMode.index + 1];
-  const editorUnlocked = devMode && level1Done;
+  const editorUnlocked = level1Done;
   const tapVersion = () => {
     const now = Date.now();
     const t = versionTaps.current;
@@ -898,7 +1051,7 @@ function App() {
         <button className="sr-menu-button" onClick={() => { const d = (window as unknown as { srDesktop?: { quit: () => void } }).srDesktop; if (d) d.quit(); else window.alert('Чтобы выйти из игры, закройте вкладку браузера.'); }}>ВЫХОД</button>
       </nav>
       <div className="sr-rooftop"><div className="sr-robot"><i /><b /><span /></div></div>
-      <div className="sr-version" onClick={tapVersion}>v1.3.1{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
+      <div className="sr-version" onClick={tapVersion}>v1.4.0{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
       {devDialog !== 'closed' && (
         <div className="sr-dev-dialog" role="dialog" aria-modal="true">
           <div className="sr-dev-card">
@@ -932,6 +1085,7 @@ function App() {
         ask={askConfirm}
         show={showText}
         input={askText}
+        isDev={devMode}
       />
       {dialogNode}
     </>
@@ -958,6 +1112,18 @@ function App() {
         {dialogNode}
         <div className="sr-levels-inner">
           <button className="settings-trigger" onClick={() => setPage('title')}>← В меню</button>
+          {editorUnlocked && (
+            <>
+              <h2>МОИ УРОВНИ</h2>
+              {loadDrafts().length === 0 && <p className="ed-empty">Здесь появятся уровни, сохранённые в редакторе.</p>}
+              {loadDrafts().map((l) => (
+                <div className="ed-row" key={l.id}>
+                  <span>{l.name}</span>
+                  <button className="settings-trigger" onClick={() => startLevel(l, { kind: 'single' })}>Играть</button>
+                </div>
+              ))}
+            </>
+          )}
           <h2>ОПУБЛИКОВАННЫЕ УРОВНИ</h2>
           {published.length === 0 && <p className="ed-empty">Опубликованных уровней пока нет.</p>}
           {published.map((l) => (
