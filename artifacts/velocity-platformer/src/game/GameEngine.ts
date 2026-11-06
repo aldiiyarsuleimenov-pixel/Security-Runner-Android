@@ -8,8 +8,9 @@ export interface GameInput {
   groundSlam: boolean;
 }
 
-export interface MoveAnim { fx: number; fy: number; tx: number; ty: number; t: number; dur: number }
-export interface SpinAnim { from: number; t: number; dur: number }
+export interface MoveAnim { fx: number; fy: number; tx: number; ty: number; t: number; dur: number; lin?: boolean }
+export interface SpinAnim { from: number; t: number; dur: number; lin?: boolean }
+export interface FadeAnim { from: number; to: number; t: number; dur: number; lin?: boolean; hideEnd?: boolean }
 
 /** Runtime state that triggers can change on any level object. */
 export interface Dynamic {
@@ -33,6 +34,14 @@ export interface Dynamic {
   pulse?: number;
   flash?: number;
   hitFlash?: number;
+  /** Opacity 0..1 while a trigger fades the object in or out. */
+  alpha?: number;
+  fade?: FadeAnim;
+  /** Smooth colour change: previous colour, progress 0..1 and duration. */
+  colorFrom?: string;
+  colorK?: number;
+  colorDur?: number;
+  colorLin?: boolean;
 }
 
 export interface GameRect extends Dynamic {
@@ -60,6 +69,8 @@ export interface GamePickup extends Dynamic {
 }
 
 export type GameText = LevelText & Dynamic;
+
+export interface StylePopup { id: number; x: number; y: number; text: string; amount: number; age: number }
 
 interface WorldCapture {
   platforms: GamePlatform[];
@@ -110,6 +121,12 @@ export interface GameSnapshot {
   /** 1 right after a successful technique (Ground Jump / Slide Jump), fading to 0. */
   techFlash: number;
   techKind: "ground" | "slide" | "";
+  /** Speedrun timer in seconds; starts on the first input and stops at the exit. */
+  time: number;
+  timerRunning: boolean;
+  style: number;
+  styleActive: boolean;
+  popups: StylePopup[];
   trail: TrailGhost[];
   exit: GameRect;
   effects: GameEffect[];
@@ -147,6 +164,8 @@ const SLAM_DAMAGE = 3; // 2 ground slams destroy a turret
 const FRAGILE_IMPACT = 380; // landing faster than this (a jump onto it) breaks a fragile floor
 const CRUMBLE_DELAY = 1;
 
+const ez = (k: number, lin?: boolean) => (lin ? Math.max(0, Math.min(1, k)) : ease(k));
+
 const ease = (k: number) => {
   const c = Math.max(0, Math.min(1, k));
   return c * c * (3 - 2 * c);
@@ -178,6 +197,15 @@ export class GameEngine {
   private trail: TrailGhost[] = [];
   private trailTimer = 0;
   private sounds: string[] = [];
+  private pending: Array<{ t: number; trig: LevelTrigger }> = [];
+  private runTime = 0;
+  private runStarted = false;
+  private styleActive = false;
+  private style = 0;
+  private popups: StylePopup[] = [];
+  private popupId = 0;
+  private standingId: string | null = null;
+  private pendingTech: { kind: "ground" | "slide"; platformId: string | null; bottom: number; left: boolean; over: boolean; pickup: boolean } | null = null;
   private dashHits = new Set<string>();
   private lastLand: { p: GamePlatform; vy: number } | null = null;
   private x = 0;
@@ -226,6 +254,11 @@ export class GameEngine {
     this.restart();
   }
 
+  /** Style points only count on levels the player has already cleared once. */
+  setStyleActive(on: boolean): void {
+    this.styleActive = on;
+  }
+
   setViewportAspectRatio(aspectRatio: number): void {
     if (!Number.isFinite(aspectRatio) || aspectRatio <= 0) return;
     this.viewportWidth = clamp(VIEW_HEIGHT * aspectRatio, 300, 2000);
@@ -238,9 +271,11 @@ export class GameEngine {
 
   step(input: GameInput, dtSeconds: number): void {
     if (this.complete) return;
-
     const dt = clamp(dtSeconds, 0, 1 / 30);
     if (dt === 0) return;
+    if (!this.runStarted && (input.move !== 0 || input.jump || input.dash || input.slide || input.groundSlam)) this.runStarted = true;
+    if (this.runStarted) this.runTime += dt;
+    this.popups = this.popups.map((p) => ({ ...p, age: p.age + dt })).filter((p) => p.age < 1.3);
 
     this.dashCooldown = Math.max(0, this.dashCooldown - dt);
     this.hitInvulnerability = Math.max(0, this.hitInvulnerability - dt);
@@ -417,6 +452,7 @@ export class GameEngine {
     }
 
     if (this.updateTurrets(dt)) return;
+    this.trackTech();
 
     for (const pickup of this.pickups) {
       if (
@@ -434,6 +470,7 @@ export class GameEngine {
         )
       ) {
         pickup.collected = true;
+        if (this.pendingTech) this.pendingTech.pickup = true;
         this.score += 1;
         this.addEffect("pickup", pickup.x, pickup.y, 0.48);
       }
@@ -493,6 +530,11 @@ export class GameEngine {
       texts: this.texts,
       bg: this.level.bg,
       images: this.level.images ?? {},
+      time: this.runTime,
+      timerRunning: this.runStarted && !this.complete,
+      style: this.style,
+      styleActive: this.styleActive,
+      popups: this.popups,
       techFlash: this.techDuration > 0 ? this.techTimer / this.techDuration : 0,
       techKind: this.techTimer > 0 ? this.techKind : "",
       trail: this.trail.map((g) => ({ ...g })),
@@ -524,6 +566,12 @@ export class GameEngine {
 
   restart(): void {
     this.restoreWorld(null);
+    this.runTime = 0;
+    this.runStarted = false;
+    this.style = 0;
+    this.popups = [];
+    this.pendingTech = null;
+    this.standingId = null;
     this.pickups = this.level.pickups.map((pickup) => ({ ...pickup, collected: false }));
     this.checkpointWorld = null;
     this.techTimer = 0;
@@ -602,10 +650,10 @@ export class GameEngine {
     for (const s of this.solidList()) {
       if (!overlaps(this.x, this.y, this.width, this.height, s.x, s.y, s.width, s.height)) continue;
       // A dash smashes through green SBB walls and chips turrets.
-      if (s.kind === "sbb" && this.dashing) { this.breakPlatform(s); continue; }
+      if (s.kind === "sbb" && this.dashing) { this.breakPlatform(s); this.addStyle(30, "СББ"); continue; }
       if (s.kind === "turret" && this.dashing && !this.dashHits.has(s.id)) {
         this.dashHits.add(s.id);
-        this.damageTurret(s, DASH_DAMAGE);
+        this.damageTurret(s, DASH_DAMAGE, "dash");
         if (s.hidden) continue;
       }
       if (previousX + this.width <= s.x + 0.01) this.x = s.x - this.width;
@@ -682,6 +730,7 @@ export class GameEngine {
     this.slideJumpTimer = 0;
     this.slamJumpTimer = 0;
     this.restoreWorld(this.checkpointWorld);
+    this.pendingTech = null;
     this.techTimer = 0;
     this.trail = [];
     this.cameraX = this.cameraTargetX();
@@ -706,6 +755,7 @@ export class GameEngine {
   // ---------- dynamic world: triggers, moving / rotating / hiding objects ----------
 
   private startTech(kind: "ground" | "slide"): void {
+    this.pendingTech = { kind, platformId: this.standingId, bottom: this.y + this.height, left: false, over: false, pickup: false };
     this.techKind = kind;
     this.techDuration = kind === "ground" ? 0.85 : 0.5;
     this.techTimer = this.techDuration;
@@ -730,11 +780,35 @@ export class GameEngine {
     this.addEffect("break", p.x + p.width / 2, p.y + p.height / 2, 0.55);
   }
 
-  private damageTurret(t: GamePlatform, amount: number): void {
+  private damageTurret(t: GamePlatform, amount: number, by: "dash" | "slam"): void {
     t.hp = (t.hp ?? TURRET_HP) - amount;
     t.hitFlash = 0.18;
     this.sound("hit");
-    if (t.hp <= 0) this.breakPlatform(t);
+    if (t.hp <= 0) {
+      this.breakPlatform(t);
+      // A ground slam is the harder, flashier kill.
+      if (by === "slam") this.addStyle(200, "ТУРЕЛЬ СЛЭМОМ");
+      else this.addStyle(100, "ТУРЕЛЬ РЫВКОМ");
+    }
+  }
+
+  private addStyle(amount: number, label: string): void {
+    if (!this.styleActive) return;
+    this.style += amount;
+    this.popups.push({ id: ++this.popupId, x: this.x + this.width / 2, y: this.y - 8, text: `${amount > 0 ? "+" : ""}${amount} ${label}`, amount, age: 0 });
+    if (this.popups.length > 6) this.popups.shift();
+  }
+
+  /** While a technique jump is in the air, remember whether it flew over a hazard or grabbed a shard. */
+  private trackTech(): void {
+    const pt = this.pendingTech;
+    if (!pt) return;
+    if (!this.grounded) pt.left = true;
+    const cx = this.x + this.width / 2;
+    const bottom = this.y + this.height;
+    for (const sp of this.spikes) {
+      if (!sp.hidden && cx >= sp.x && cx <= sp.x + sp.width && bottom <= sp.y + 6 && sp.y - bottom < 140) pt.over = true;
+    }
   }
 
   /** Called every frame the player rests on a platform; `lastLand.vy` is the speed of the touchdown. */
@@ -742,13 +816,22 @@ export class GameEngine {
     const land = this.lastLand;
     if (!land) return;
     const p = land.p;
+    const pt = this.pendingTech;
+    if (pt && pt.left) {
+      // A technique counts as style only if it achieved something: a new platform, real height, a hazard or a shard.
+      const useful = p.id !== pt.platformId || pt.bottom - p.y >= 80 || pt.over || pt.pickup;
+      if (useful) this.addStyle(pt.kind === "ground" ? 60 : 40, pt.kind === "ground" ? "ГРАУНД ДЖАМП" : "СЛАЙД ДЖАМП");
+      else this.addStyle(pt.kind === "ground" ? -30 : -20, "ЗРЯ");
+      this.pendingTech = null;
+    }
+    this.standingId = p.id;
     if (p.kind === "fragile" && (this.slamming || land.vy >= FRAGILE_IMPACT)) {
       this.breakPlatform(p);
     } else if (p.kind === "crumble" && p.crumbleT === undefined) {
       p.crumbleT = 0;
       this.sound("crack");
     } else if (p.kind === "turret" && this.slamming) {
-      this.damageTurret(p, SLAM_DAMAGE);
+      this.damageTurret(p, SLAM_DAMAGE, "slam");
     }
   }
 
@@ -891,6 +974,7 @@ export class GameEngine {
     this.triggers = this.level.triggers ?? [];
     this.fired = new Set(base.fired);
     this.inside = new Set();
+    this.pending = [];
   }
 
   private updateWorld(dt: number): void {
@@ -904,13 +988,30 @@ export class GameEngine {
             this.x < p.x + p.width,
         )
       : undefined;
+    if (this.pending.length) {
+      const due = this.pending.filter((p) => (p.t -= dt) <= 0);
+      this.pending = this.pending.filter((p) => p.t > 0);
+      for (const p of due) this.fireTrigger(p.trig);
+    }
     const all: Array<GameRect | GamePickup | GameText> = [...this.platforms, ...this.spikes, ...this.pickups, ...this.texts];
     for (const o of all) {
+      if (o.fade) {
+        o.fade.t = Math.min(o.fade.dur, o.fade.t + dt);
+        o.alpha = o.fade.from + (o.fade.to - o.fade.from) * ez(o.fade.t / o.fade.dur, o.fade.lin);
+        if (o.fade.t >= o.fade.dur) {
+          if (o.fade.hideEnd) o.hidden = true;
+          delete o.fade;
+          delete o.alpha;
+        }
+      }
+      if (o.colorK !== undefined && o.colorK < 1) {
+        o.colorK = Math.min(1, o.colorK + dt / Math.max(0.02, o.colorDur ?? 0.5));
+      }
       if (o.mv) {
         const ox = o.x;
         const oy = o.y;
         o.mv.t = Math.min(o.mv.dur, o.mv.t + dt);
-        const k = ease(o.mv.t / o.mv.dur);
+        const k = ez(o.mv.t / o.mv.dur, o.mv.lin);
         o.x = o.mv.fx + (o.mv.tx - o.mv.fx) * k;
         o.y = o.mv.fy + (o.mv.ty - o.mv.fy) * k;
         if (o === ride) {
@@ -921,7 +1022,7 @@ export class GameEngine {
       }
       if (o.spinAnim) {
         o.spinAnim.t = Math.min(o.spinAnim.dur, o.spinAnim.t + dt);
-        o.spin = o.spinAnim.from * (1 - ease(o.spinAnim.t / o.spinAnim.dur));
+        o.spin = o.spinAnim.from * (1 - ez(o.spinAnim.t / o.spinAnim.dur, o.spinAnim.lin));
         if (o.spinAnim.t >= o.spinAnim.dur) {
           delete o.spinAnim;
           delete o.spin;
@@ -960,7 +1061,8 @@ export class GameEngine {
         this.inside.add(t.id);
         if (!(t.once && this.fired.has(t.id))) {
           this.fired.add(t.id);
-          this.fireTrigger(t);
+          if ((t.delay ?? 0) > 0.01) this.pending.push({ t: t.delay ?? 0, trig: t });
+          else this.fireTrigger(t);
         }
       } else if (!inZone && was) {
         this.inside.delete(t.id);
@@ -970,17 +1072,41 @@ export class GameEngine {
 
   private fireTrigger(t: LevelTrigger): void {
     if (!t.target) return;
-    const dur = Math.max(0.05, t.duration || 0.5);
+    const dur = Math.max(0, t.duration ?? 0);
+    const instant = dur < 0.02;
+    const lin = t.ease === "linear";
     const hit = <T extends Dynamic>(list: T[]) => list.filter((o) => o.group === t.target);
     const everything: Array<GameRect | GamePickup | GameText> = [
       ...hit(this.platforms), ...hit(this.spikes), ...hit(this.pickups), ...hit(this.texts),
     ];
     if (t.action === "move") {
-      for (const o of everything) o.mv = { fx: o.x, fy: o.y, tx: o.x + t.dx, ty: o.y + t.dy, t: 0, dur };
-    } else if (t.action === "hide" || t.action === "show") {
-      for (const o of everything) o.hidden = t.action === "hide";
+      for (const o of everything) {
+        if (instant) { o.x += t.dx; o.y += t.dy; delete o.mv; continue; }
+        // Re-triggering while moving continues from the current position.
+        o.mv = { fx: o.x, fy: o.y, tx: o.x + t.dx, ty: o.y + t.dy, t: 0, dur, lin };
+      }
+    } else if (t.action === "show") {
+      for (const o of everything) {
+        if (!o.hidden && !o.fade) continue;
+        o.hidden = false;
+        if (instant) { delete o.fade; delete o.alpha; continue; }
+        o.alpha = 0;
+        o.fade = { from: 0, to: 1, t: 0, dur, lin };
+      }
+    } else if (t.action === "hide") {
+      for (const o of everything) {
+        if (o.hidden) continue;
+        if (instant) { o.hidden = true; delete o.fade; delete o.alpha; continue; }
+        o.fade = { from: o.alpha ?? 1, to: 0, t: 0, dur, lin, hideEnd: true };
+      }
     } else if (t.action === "color") {
-      for (const o of everything) o.color = (t.color || undefined) as string;
+      for (const o of everything) {
+        o.colorFrom = (o.colorK ?? 1) < 1 ? o.colorFrom : o.color;
+        o.color = (t.color || undefined) as string;
+        o.colorDur = dur;
+        o.colorLin = lin;
+        o.colorK = instant ? 1 : 0;
+      }
     } else if (t.action === "rotate") {
       for (const o of [...hit(this.platforms), ...hit(this.spikes)]) {
         if ("kind" in o && o.kind === "ground") continue;
@@ -998,8 +1124,10 @@ export class GameEngine {
           o.mv.fy += o.y - oldY; o.mv.ty += o.y - oldY;
         }
         if (!("kind" in o)) o.dir = (((o.dir ?? 0) + (t.angle > 0 ? 1 : 3)) % 4) as 0 | 1 | 2 | 3;
-        o.spinAnim = { from: -t.angle, t: 0, dur };
-        o.spin = -t.angle;
+        if (!instant) {
+          o.spinAnim = { from: -t.angle, t: 0, dur, lin };
+          o.spin = -t.angle;
+        }
       }
     }
   }

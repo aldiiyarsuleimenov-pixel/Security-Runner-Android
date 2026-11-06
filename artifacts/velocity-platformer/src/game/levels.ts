@@ -39,8 +39,12 @@ export interface LevelTrigger {
   angle: 90 | -90;
   /** color: CSS color to apply. */
   color: string;
-  /** Seconds the move / rotate animation takes. */
+  /** Seconds the animation takes (move, rotate, fade in / out, colour change). 0 means instantly. No upper limit. */
   duration: number;
+  /** Seconds to wait after the player enters the zone before the action starts. */
+  delay?: number;
+  /** "smooth" eases in and out, "linear" moves at a constant speed. */
+  ease?: "smooth" | "linear";
 }
 
 export interface LevelData {

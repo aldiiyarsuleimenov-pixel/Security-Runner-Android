@@ -74,3 +74,47 @@ export function storySequence(): LevelData[] {
 export function exportStoryFile(): string {
   return JSON.stringify({ levels: loadPublished(), order: getStoryOrder() });
 }
+
+// ---------- records, style, online helpers ----------
+const KEY_PB = "sr-pb";
+const KEY_STYLE_BEST = "sr-style-best";
+const KEY_CLEARED = "sr-cleared-levels";
+const KEY_TEST_FP = "sr-tested-fp";
+const KEY_NAME = "sr-player-name";
+const KEY_LIKED = "sr-liked";
+
+export const isCleared = (levelId: string) => read<string[]>(KEY_CLEARED, []).includes(levelId);
+export const getPB = (levelId: string): number | undefined => read<Record<string, number>>(KEY_PB, {})[levelId];
+
+export interface RunResult { newPB: boolean; pb: number; firstClear: boolean; newBestStyle: boolean; bestStyle: number | undefined }
+
+/** Stores the time / style of a finished run and reports what improved. */
+export function recordRun(levelId: string, time: number, style: number, styleActive: boolean): RunResult {
+  const firstClear = !isCleared(levelId);
+  if (firstClear) write(KEY_CLEARED, [...read<string[]>(KEY_CLEARED, []), levelId]);
+  const pbs = read<Record<string, number>>(KEY_PB, {});
+  const newPB = pbs[levelId] === undefined || time < pbs[levelId];
+  if (newPB) { pbs[levelId] = time; write(KEY_PB, pbs); }
+  const best = read<Record<string, number>>(KEY_STYLE_BEST, {});
+  const newBestStyle = styleActive && (best[levelId] === undefined || style > best[levelId]);
+  if (newBestStyle) { best[levelId] = style; write(KEY_STYLE_BEST, best); }
+  return { newPB, pb: pbs[levelId], firstClear, newBestStyle, bestStyle: best[levelId] };
+}
+
+/** Short hash of everything that affects how a level plays (not its name or images). */
+export function levelFingerprint(l: LevelData): string {
+  const text = JSON.stringify([l.worldWidth, l.start, l.checkpoint, l.exit, l.platforms, l.spikes, l.pickups, l.texts, l.triggers]);
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+  return `${text.length}:${h}`;
+}
+/** The author has to beat the level in test mode before it can be shared online. */
+export function markTestCleared(l: LevelData) {
+  write(KEY_TEST_FP, { ...read<Record<string, string>>(KEY_TEST_FP, {}), [l.id]: levelFingerprint(l) });
+}
+export const wasTestCleared = (l: LevelData) => read<Record<string, string>>(KEY_TEST_FP, {})[l.id] === levelFingerprint(l);
+
+export const getPlayerName = () => read<string>(KEY_NAME, "");
+export const setPlayerName = (name: string) => write(KEY_NAME, name);
+export const hasLiked = (id: string) => read<string[]>(KEY_LIKED, []).includes(id);
+export const markLiked = (id: string) => write(KEY_LIKED, [...read<string[]>(KEY_LIKED, []), id]);

@@ -3,7 +3,8 @@ import type { GamePlatform, GameRect } from './game/GameEngine';
 import { EXIT_HEIGHT, EXIT_WIDTH, FLOOR_Y, GRID, blankLevel, type LevelData, type LevelPickup, type LevelText, type LevelTrigger } from './game/levels';
 import { drawText, drawTiled, getImg, textBox } from './game/draw';
 import EditorPanel from './EditorPanel';
-import { deleteDraft, loadDrafts, publishLevel, saveDraft } from './game/levelStore';
+import { deleteDraft, loadDrafts, publishLevel, saveDraft, wasTestCleared } from './game/levelStore';
+import { onlineEnabled } from './game/online';
 
 type Tool = 'hand' | 'select' | 'block' | 'half' | 'platform' | 'ground' | 'sbb' | 'fragile' | 'crumble' | 'turret' | 'spike' | 'pickup' | 'trigger' | 'text' | 'start' | 'checkpoint' | 'exit' | 'erase';
 type Rot = 0 | 1 | 2 | 3;
@@ -122,9 +123,11 @@ interface Props {
   input: (message: string, initial?: string) => Promise<string | null>;
   /** Developer mode: only developers can publish levels. */
   isDev: boolean;
+  /** Shares the level with everybody online; resolves to a message for the player. */
+  onUpload: (level: LevelData) => Promise<string>;
 }
 
-export default function Editor({ level, onChange, onTest, onExit, ask, show, input, isDev }: Props) {
+export default function Editor({ level, onChange, onTest, onExit, ask, show, input, isDev, onUpload }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levelRef = useRef<LevelData | null>(level);
   const synced = useRef<LevelData | null>(level);
@@ -352,7 +355,7 @@ export default function Editor({ level, onChange, onTest, onExit, ask, show, inp
       case 'trigger': {
         const w = GRID * 2, h = GRID * 4;
         const x = snapX(wx - w / 2), y = snapY(wy - h / 2);
-        const trig: LevelTrigger = { id: uid('trig'), x, y, width: w, height: h, action: 'hide', target: '', once: true, dx: 0, dy: -GRID * 4, angle: 90, color: '#ff7a59', duration: 0.6 };
+        const trig: LevelTrigger = { id: uid('trig'), x, y, width: w, height: h, action: 'hide', target: '', once: true, dx: 0, dy: -GRID * 4, angle: 90, color: '#ff7a59', duration: 0.6, delay: 0, ease: 'smooth' };
         (next.triggers = next.triggers ?? []).push(trig);
         setSel([trig.id]);
         setPanelOpen(true);
@@ -741,6 +744,15 @@ export default function Editor({ level, onChange, onTest, onExit, ask, show, inp
     if (!(await ask('Опубликовать уровень? Он появится в меню «Уровни».'))) return;
     const ok = saveDraft(cur) && publishLevel(cur); setDrafts(loadDrafts()); flash(ok ? 'Опубликовано. Смотрите меню «Уровни».' : 'Не хватило места: уменьшите картинки.');
   };
+  const doUpload = async () => {
+    const cur = levelRef.current;
+    if (!cur) return;
+    if (!onlineEnabled()) { flash('Онлайн-сервер ещё не настроен.'); return; }
+    const problem = validate(cur);
+    if (problem) { flash(problem); return; }
+    if (!wasTestCleared(cur)) { flash('Сначала пройдите уровень в режиме «▶ Тест» (без правок после прохождения).'); return; }
+    flash(await onUpload(cur));
+  };
   const doExport = async () => {
     const cur = levelRef.current;
     if (!cur) return;
@@ -816,6 +828,7 @@ export default function Editor({ level, onChange, onTest, onExit, ask, show, inp
           <button className="settings-trigger" onClick={doSave}>Сохранить</button>
           {isDev && <button className="settings-trigger" onClick={doPublish}>Опубликовать</button>}
           <button className="settings-trigger" onClick={doExport}>JSON</button>
+          <button className="settings-trigger" onClick={doUpload}>☁ Выложить в сеть</button>
           <button className="settings-trigger" onClick={selectAll}>Выбрать всё</button>
           <button className="settings-trigger" onClick={() => pickImage('bg')}>Фон: выбрать</button>
           {cur.bg && <button className="settings-trigger" onClick={() => mutate((l) => { delete l.bg; })}>Фон: убрать</button>}

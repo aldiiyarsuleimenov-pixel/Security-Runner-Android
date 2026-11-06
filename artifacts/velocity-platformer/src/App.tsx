@@ -11,13 +11,15 @@ import { GameEngine } from './game/GameEngine';
 import Editor from './Editor';
 import { drawText, drawTiled, getImg, hashId, spinAround } from './game/draw';
 import { playSound } from './game/audio';
+import { resolveColor } from './game/colors';
+import * as online from './game/online';
 import { LEVEL_1, STORY_LEVELS, type LevelData } from './game/levels';
 import {
-  DEV_CODE, exportStoryFile, getStoryOrder, loadDrafts, isDevMode, isLevel1Done, loadPublished, markLevel1Done, setDevMode,
+  DEV_CODE, exportStoryFile, getPB, getPlayerName, getStoryOrder, hasLiked, isCleared, loadDrafts, markLiked, markTestCleared, recordRun, setPlayerName, type RunResult, isDevMode, isLevel1Done, loadPublished, markLevel1Done, setDevMode,
   setStoryOrder, storySequence, unpublishLevel,
 } from './game/levelStore';
 
-type PlayMode = { kind: 'story'; index: number } | { kind: 'single' } | { kind: 'test' };
+type PlayMode = { kind: 'story'; index: number } | { kind: 'single' } | { kind: 'test' } | { kind: 'online' };
 
 type InputState = {
   move: number;
@@ -30,6 +32,7 @@ type InputState = {
 type Rect = {
   id: string | number; x: number; y: number; width: number; height: number; kind?: string; dir?: 0 | 1 | 2 | 3;
   skin?: string; color?: string; hidden?: boolean; spin?: number;
+  alpha?: number; colorFrom?: string; colorK?: number;
   crumbleT?: number; hp?: number; aim?: number; aimOn?: boolean; locked?: boolean; beam?: number; pulse?: number; flash?: number; hitFlash?: number;
 };
 type Snapshot = {
@@ -41,8 +44,10 @@ type Snapshot = {
   worldWidth: number; worldHeight: number;
   platforms: Rect[];
   spikes: Rect[];
-  pickups: { id: string | number; x: number; y: number; size: number; collected: boolean; color?: string; hidden?: boolean }[];
-  texts: { id: string; x: number; y: number; text: string; size: number; color: string; hidden?: boolean }[];
+  pickups: { id: string | number; x: number; y: number; size: number; collected: boolean; color?: string; colorFrom?: string; colorK?: number; alpha?: number; hidden?: boolean }[];
+  texts: { id: string; x: number; y: number; text: string; size: number; color: string; colorFrom?: string; colorK?: number; alpha?: number; hidden?: boolean }[];
+  time: number; timerRunning: boolean; style: number; styleActive: boolean;
+  popups: { id: number; x: number; y: number; text: string; amount: number; age: number }[];
   bg?: string; images: Record<string, string>;
   techFlash: number; techKind: string; trail: { x: number; y: number; width: number; height: number; age: number }[];
   exit: Rect;
@@ -155,6 +160,15 @@ function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: num
   ctx.arcTo(x, y + h, x, y, radius);
   ctx.arcTo(x, y, x + w, y, radius);
   ctx.closePath();
+}
+
+function formatTime(t: number): string {
+  const cs = Math.floor(t * 100);
+  const h = Math.floor(cs / 360000);
+  const m = Math.floor((cs % 360000) / 6000);
+  const sec = Math.floor((cs % 6000) / 100);
+  const c2 = String(cs % 100).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}.${c2}` : `${m}:${String(sec).padStart(2, '0')}.${c2}`;
 }
 
 /** Green translucent security wall (СББ): breaks when the player dashes into it. */
@@ -342,6 +356,7 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
     const x = worldX(platform.x);
     if (x + platform.width < -100 || x > vw + 100) continue;
     ctx.save();
+    ctx.globalAlpha = platform.alpha ?? 1;
     spinAround(ctx, x, platform.y, platform.width, platform.height, platform.spin);
     if (platform.kind === 'sbb') { drawSbb(ctx, x, platform.y, platform.width, platform.height, clock, hashId(platform.id)); ctx.restore(); continue; }
     if (platform.kind === 'fragile' || platform.kind === 'crumble') { drawIron(ctx, x, platform.y, platform.width, platform.height, platform.kind, platform.crumbleT, clock); ctx.restore(); continue; }
@@ -350,13 +365,13 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
     const isSolid = platform.kind === 'block' || platform.kind === 'half';
     if (skin) {
       drawTiled(ctx, skin, x, platform.y, platform.width, platform.height, 0, vw);
-      if (platform.color) { ctx.globalAlpha = .4; ctx.fillStyle = platform.color; ctx.fillRect(x, platform.y, platform.width, platform.height); ctx.globalAlpha = 1; }
+      if (platform.color || platform.colorFrom) { ctx.globalAlpha = .4 * (platform.alpha ?? 1); ctx.fillStyle = resolveColor(platform, '#000000'); ctx.fillRect(x, platform.y, platform.width, platform.height); ctx.globalAlpha = platform.alpha ?? 1; }
       ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 1;
       ctx.strokeRect(x + .5, platform.y + .5, platform.width - 1, Math.min(platform.height, 200) - 1);
     } else {
-      ctx.fillStyle = platform.color ?? (isSolid ? '#3b5052' : '#2b3537');
+      ctx.fillStyle = resolveColor(platform, isSolid ? '#3b5052' : '#2b3537');
       ctx.fillRect(x, platform.y, platform.width, platform.height);
-      ctx.fillStyle = platform.color ? 'rgba(255,255,255,.35)' : '#85958e';
+      ctx.fillStyle = (platform.color || platform.colorFrom) ? 'rgba(255,255,255,.35)' : '#85958e';
       ctx.fillRect(x, platform.y, platform.width, Math.min(3, platform.height));
       ctx.fillStyle = 'rgba(7,12,13,.35)';
       ctx.fillRect(x, platform.y + 5, platform.width, Math.max(0, platform.height - 5));
@@ -414,6 +429,7 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
     const x = worldX(spike.x);
     if (spike.hidden || x + spike.width < -60 || x > vw + 60) continue;
     ctx.save();
+    ctx.globalAlpha = spike.alpha ?? 1;
     spinAround(ctx, x, spike.y, spike.width, spike.height, spike.spin);
     const dir = spike.dir ?? 0;
     const horiz = dir === 0 || dir === 2;
@@ -429,7 +445,7 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
       else if (dir === 1) { ctx.moveTo(x, sy + p0); ctx.lineTo(x + w, sy + pm); ctx.lineTo(x, sy + p1); }
       else { ctx.moveTo(x + w, sy + p0); ctx.lineTo(x, sy + pm); ctx.lineTo(x + w, sy + p1); }
       ctx.closePath();
-      ctx.fillStyle = spike.color ?? '#c3c5b7';
+      ctx.fillStyle = resolveColor(spike, '#c3c5b7');
       ctx.fill();
       ctx.strokeStyle = '#f2744f'; ctx.lineWidth = 1.4; ctx.stroke();
     }
@@ -450,8 +466,9 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
     const pulse = 1 + Math.sin(clock * 5 + phase) * .14;
     const size = Math.max(pickup.size, 18) * 1.45 * pulse;
     const bob = Math.sin(clock * 2.6 + phase) * 4;
-    const main = pickup.color ?? '#65e4df';
+    const main = resolveColor(pickup, '#65e4df');
     ctx.save();
+    ctx.globalAlpha = pickup.alpha ?? 1;
     ctx.translate(x, pickup.y + bob);
     // soft halo + ring
     const halo = ctx.createRadialGradient(0, 0, 2, 0, 0, size * 1.7);
@@ -479,7 +496,9 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
     if (t.hidden) continue;
     const tx = worldX(t.x);
     if (tx > vw + 400 || tx < -600) continue;
-    drawText(ctx, t.text, tx, t.y, t.size, t.color);
+    ctx.globalAlpha = t.alpha ?? 1;
+    drawText(ctx, t.text, tx, t.y, t.size, resolveColor(t, '#eff3dd'));
+    ctx.globalAlpha = 1;
   }
 
   // Exit gate.
@@ -610,6 +629,21 @@ function drawArena(canvas: HTMLCanvasElement, snap: Snapshot, clock: number) {
   ctx.fillRect(bodyX + pw * .15, bodyY + ph * .88, pw * .7, ph * .1);
   ctx.restore();
 
+  // Floating style-point popups: green for rewards, red for wasted techniques.
+  for (const pop of snap.popups) {
+    const life = Math.max(0, 1 - pop.age / 1.3);
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, life * 1.6);
+    ctx.font = '800 15px "IBM Plex Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(6,10,11,.85)'; ctx.lineJoin = 'round';
+    const py2 = pop.y - pop.age * 46;
+    ctx.strokeText(pop.text, worldX(pop.x), py2);
+    ctx.fillStyle = pop.amount >= 0 ? '#7dff9b' : '#ff6a5a';
+    ctx.fillText(pop.text, worldX(pop.x), py2);
+    ctx.restore();
+  }
+
   // Short blue flash around the screen edges confirms a technique was performed.
   if (snap.techFlash > 0) {
     const edge = ctx.createRadialGradient(vw / 2, vh / 2, vh * .35, vw / 2, vh / 2, vw * .62);
@@ -641,13 +675,20 @@ function App() {
   const captureRef = useRef<BindingName | null>(null);
   const [hud, setHud] = useState({
     score: 0, deaths: 0, progress: 0, complete: false,
-    health: 100, maxHealth: 100, dashEnergy: 100, maxDashEnergy: 100, controlsLocked: false,
+    health: 100, maxHealth: 100, dashEnergy: 100, maxDashEnergy: 100, controlsLocked: false, style: 0, styleActive: false,
   });
   const [activeTouches, setActiveTouches] = useState<Set<string>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [page, setPage] = useState<'title' | 'settings' | 'game' | 'levels' | 'editor'>('title');
+  const [page, setPage] = useState<'title' | 'settings' | 'game' | 'levels' | 'editor' | 'online'>('title');
   const pageRef = useRef<string>('title');
   const currentLevelRef = useRef<LevelData>(LEVEL_1);
+  const playModeRef = useRef<PlayMode>({ kind: 'story', index: 0 });
+  const timerElRef = useRef<HTMLDivElement>(null);
+  const [result, setResult] = useState<(RunResult & { time: number; style: number; styleActive: boolean; testOnly: boolean }) | null>(null);
+  const [onlineSort, setOnlineSort] = useState<'new' | 'top'>('new');
+  const [onlineList, setOnlineList] = useState<online.OnlineLevelInfo[]>([]);
+  const [onlineBusy, setOnlineBusy] = useState(false);
+  const [onlineError, setOnlineError] = useState('');
   const [currentLevel, setCurrentLevel] = useState<LevelData>(LEVEL_1);
   const [playMode, setPlayMode] = useState<PlayMode>({ kind: 'story', index: 0 });
   const [editing, setEditing] = useState<LevelData | null>(null);
@@ -720,6 +761,8 @@ function App() {
 
   const restart = useCallback(() => {
     engineRef.current?.restart();
+    engineRef.current?.setStyleActive(playModeRef.current.kind !== 'test' && isCleared(currentLevelRef.current.id));
+    if (timerElRef.current) timerElRef.current.textContent = '0:00.00';
     keyboardRef.current.clear();
     touchActionsRef.current.clear();
     joystickRef.current = { pointerId: -1, x: 0 };
@@ -731,7 +774,7 @@ function App() {
         progress: Math.round((snap.player.x / Math.max(snap.worldWidth, 1)) * 100),
         complete: snap.complete,
         health: snap.health, maxHealth: snap.maxHealth, dashEnergy: snap.dashEnergy,
-        maxDashEnergy: snap.maxDashEnergy, controlsLocked: snap.controlsLocked,
+        maxDashEnergy: snap.maxDashEnergy, controlsLocked: snap.controlsLocked, style: snap.style, styleActive: snap.styleActive,
       });
     }
   }, []);
@@ -772,6 +815,7 @@ function App() {
         engine.drainSounds();
       }
       const snap = engine.getSnapshot() as Snapshot;
+      if (timerElRef.current) timerElRef.current.textContent = formatTime(snap.time);
       if (canvas) drawArena(canvas, snap, now / 1000);
       if (now - lastHud > 110) {
         lastHud = now;
@@ -780,7 +824,7 @@ function App() {
           progress: Math.max(0, Math.min(100, Math.round((snap.player.x / Math.max(snap.worldWidth, 1)) * 100))),
           complete: snap.complete,
           health: snap.health, maxHealth: snap.maxHealth, dashEnergy: snap.dashEnergy,
-          maxDashEnergy: snap.maxDashEnergy, controlsLocked: snap.controlsLocked,
+          maxDashEnergy: snap.maxDashEnergy, controlsLocked: snap.controlsLocked, style: snap.style, styleActive: snap.styleActive,
         });
       }
       frame = requestAnimationFrame(tick);
@@ -997,8 +1041,10 @@ function App() {
   ];
   const startLevel = (level: LevelData, mode: PlayMode) => {
     currentLevelRef.current = level;
+    playModeRef.current = mode;
     setCurrentLevel(level);
     setPlayMode(mode);
+    setResult(null);
     engineRef.current?.loadLevel(level);
     restart();
     initial.current = engineRef.current ? (engineRef.current.getSnapshot() as Snapshot) : initial.current;
@@ -1034,6 +1080,61 @@ function App() {
   useEffect(() => {
     if (hud.complete && currentLevel.id === LEVEL_1.id && !level1Done) { markLevel1Done(); setLevel1Done(true); }
   }, [hud.complete, currentLevel.id, level1Done]);
+
+  // When a run ends: store the time / style records, or remember that a test run was cleared (needed to share online).
+  useEffect(() => {
+    if (!hud.complete) return;
+    const snap = engineRef.current?.getSnapshot() as Snapshot | undefined;
+    if (!snap) return;
+    const lvl = currentLevelRef.current;
+    if (playModeRef.current.kind === 'test') {
+      markTestCleared(lvl);
+      setResult({ time: snap.time, style: 0, styleActive: false, testOnly: true, newPB: false, pb: snap.time, firstClear: false, newBestStyle: false, bestStyle: undefined });
+      return;
+    }
+    const r = recordRun(lvl.id, snap.time, snap.style, snap.styleActive);
+    setResult({ ...r, time: snap.time, style: snap.style, styleActive: snap.styleActive, testOnly: false });
+  }, [hud.complete]);
+
+  const loadOnline = async (sort = onlineSort) => {
+    setOnlineBusy(true);
+    setOnlineError('');
+    try { setOnlineList(await online.listLevels(sort)); }
+    catch (e) { setOnlineError(e instanceof Error ? e.message : 'Не удалось загрузить список.'); }
+    setOnlineBusy(false);
+  };
+  useEffect(() => {
+    if (page === 'online' && online.onlineEnabled()) void loadOnline(onlineSort);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, onlineSort]);
+  const playOnline = async (info: online.OnlineLevelInfo) => {
+    setOnlineBusy(true);
+    setOnlineError('');
+    try { startLevel(await online.fetchLevel(info), { kind: 'online' }); }
+    catch (e) { setOnlineError(e instanceof Error ? e.message : 'Не удалось открыть уровень.'); }
+    setOnlineBusy(false);
+  };
+  const likeOnline = async (info: online.OnlineLevelInfo) => {
+    if (hasLiked(info.id)) return;
+    try {
+      await online.likeLevel(info.id);
+      markLiked(info.id);
+      setOnlineList((list) => list.map((l) => (l.id === info.id ? { ...l, likes: l.likes + 1 } : l)));
+    } catch (e) { setOnlineError(e instanceof Error ? e.message : 'Не удалось поставить лайк.'); }
+  };
+  const uploadToOnline = async (level: LevelData): Promise<string> => {
+    if (!online.onlineEnabled()) return 'Онлайн-сервер ещё не настроен (см. ONLINE_SETUP_RU.md).';
+    let name = getPlayerName();
+    if (!name) {
+      const typed = await askText('Ваше имя для подписи уровней:', '');
+      if (!typed || !typed.trim()) return 'Загрузка отменена.';
+      name = typed.trim().slice(0, 24);
+      setPlayerName(name);
+    }
+    if (!(await askConfirm(`Выложить «${level.name}» в сеть от имени ${name}? Его увидят все игроки.`))) return 'Загрузка отменена.';
+    try { await online.uploadLevel(level, name); return 'Уровень выложен! Он появится в разделе «ОНЛАЙН».'; }
+    catch (e) { return e instanceof Error ? e.message : 'Не удалось выложить уровень.'; }
+  };
   const goToTitle = () => { setSettingsOpen(false); setPage(playMode.kind === 'test' && page === 'game' ? 'editor' : 'title'); keyboardRef.current.clear(); };
   const openSettings = () => { setSettingsReturnPage(page === 'game' ? 'game' : 'title'); setSettingsTab('controls'); setPage('settings'); };
   const closeSettingsPage = () => { setPage(settingsReturnPage); keyboardRef.current.clear(); };
@@ -1046,12 +1147,13 @@ function App() {
       <nav className="sr-title-nav" aria-label="Главное меню">
         <button className="sr-menu-button is-primary" onClick={beginGame}><span>▶</span> НАЧАТЬ</button>
         <button className="sr-menu-button" onClick={() => setPage('levels')}>УРОВНИ</button>
+        <button className="sr-menu-button" onClick={() => setPage('online')}>ОНЛАЙН</button>
         {editorUnlocked && <button className="sr-menu-button" onClick={() => setPage('editor')}>РЕДАКТОР</button>}
         <button className="sr-menu-button" onClick={openSettings}>НАСТРОЙКИ</button>
         <button className="sr-menu-button" onClick={() => { const d = (window as unknown as { srDesktop?: { quit: () => void } }).srDesktop; if (d) d.quit(); else window.alert('Чтобы выйти из игры, закройте вкладку браузера.'); }}>ВЫХОД</button>
       </nav>
       <div className="sr-rooftop"><div className="sr-robot"><i /><b /><span /></div></div>
-      <div className="sr-version" onClick={tapVersion}>v1.4.0{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
+      <div className="sr-version" onClick={tapVersion}>v1.5.0{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
       {devDialog !== 'closed' && (
         <div className="sr-dev-dialog" role="dialog" aria-modal="true">
           <div className="sr-dev-card">
@@ -1086,10 +1188,44 @@ function App() {
         show={showText}
         input={askText}
         isDev={devMode}
+        onUpload={uploadToOnline}
       />
       {dialogNode}
     </>
   );
+
+  if (page === 'online') {
+    const enabled = online.onlineEnabled();
+    return (
+      <main className="sr-levels-screen">
+        {dialogNode}
+        <div className="sr-levels-inner">
+          <button className="settings-trigger" onClick={() => setPage('title')}>← В меню</button>
+          <h2>ОНЛАЙН-УРОВНИ</h2>
+          {!enabled && <p className="ed-empty">Онлайн-раздел ещё не настроен: разработчику нужно подключить сервер (инструкция в файле ONLINE_SETUP_RU.md).</p>}
+          {enabled && (
+            <>
+              <div className="ed-field">
+                <button className={`ed-tool ${onlineSort === 'new' ? 'is-on' : ''}`} onClick={() => setOnlineSort('new')}>Новые</button>
+                <button className={`ed-tool ${onlineSort === 'top' ? 'is-on' : ''}`} onClick={() => setOnlineSort('top')}>Лучшие</button>
+                <button className="ed-tool" onClick={() => void loadOnline()}>⟳ Обновить</button>
+              </div>
+              {onlineBusy && <p className="ed-empty">Загрузка…</p>}
+              {onlineError && <p className="ed-empty" style={{ color: '#ff8a70' }}>{onlineError}</p>}
+              {!onlineBusy && !onlineError && onlineList.length === 0 && <p className="ed-empty">Пока никто не выложил уровни. Будь первым: пройди свой уровень в редакторе и нажми «Выложить в сеть».</p>}
+              {onlineList.map((l) => (
+                <div className="ed-row" key={l.id}>
+                  <span>{l.name}<br /><small style={{ opacity: .6 }}>автор: {l.author}</small></span>
+                  <button className="settings-trigger" disabled={hasLiked(l.id)} onClick={() => void likeOnline(l)}>👍 {l.likes}</button>
+                  <button className="settings-trigger" disabled={onlineBusy} onClick={() => void playOnline(l)}>Играть</button>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      </main>
+    );
+  }
 
   if (page === 'levels') {
     void levelsTick;
@@ -1246,6 +1382,8 @@ function App() {
             <div className="hud-cell score-cell"><div className="hud-label">Осколки</div><div className="hud-value">{hud.score.toString().padStart(4, '0')}</div></div>
             <div className="hud-cell"><div className="hud-label">Прорыв</div><div className="hud-value">{progress}</div></div>
             <div className="hud-cell"><div className="hud-label">Падения</div><div className="hud-value">{hud.deaths.toString().padStart(2, '0')}</div></div>
+            <div className="hud-cell"><div className="hud-label">Время</div><div className="hud-value" ref={timerElRef}>0:00.00</div></div>
+            {hud.styleActive && <div className="hud-cell"><div className="hud-label">Стиль</div><div className="hud-value" style={{ color: hud.style < 0 ? '#ff6a5a' : '#7dff9b' }}>{hud.style}</div></div>}
           </div>
           <div className="vitals" aria-label="Состояние игрока">
             <div className="vital-block health-block">
@@ -1318,11 +1456,21 @@ function App() {
                 <div className="finish-kicker">Линия прорвана / Выход достигнут</div>
                 <h1 className="finish-title">ЗАБЕГ<br />ЗАВЕРШЁН.</h1>
                 <div className="finish-copy">Осколков собрано: {hud.score.toString().padStart(4, '0')} &nbsp;·&nbsp; Падений: {hud.deaths}</div>
+                {result && (
+                  <div className="finish-copy" style={{ marginTop: 6 }}>
+                    <b>Время: {formatTime(result.time)}</b>
+                    {!result.testOnly && (result.newPB ? <span style={{ color: '#7dff9b' }}> · НОВЫЙ РЕКОРД!</span> : <span> · рекорд {formatTime(result.pb)}</span>)}
+                    {result.styleActive && <div>Стиль: <b style={{ color: result.style < 0 ? '#ff6a5a' : '#7dff9b' }}>{result.style}</b>{result.newBestStyle && <span style={{ color: '#7dff9b' }}> · лучший!</span>}</div>}
+                    {!result.testOnly && result.firstClear && <div style={{ opacity: .75 }}>Очки стиля начнут считаться со следующего прохождения.</div>}
+                    {result.testOnly && <div style={{ opacity: .75 }}>Уровень пройден: теперь его можно выложить в сеть.</div>}
+                  </div>
+                )}
                 <div className="finish-actions">
                   <button className="restart-button" onClick={restart}>Ещё раз</button>
                   {hasNextStory && <button className="restart-button" onClick={nextStoryLevel}>Следующий уровень</button>}
                   {playMode.kind === 'test' && <button className="restart-button" onClick={() => setPage('editor')}>В редактор</button>}
                   {playMode.kind === 'single' && <button className="restart-button" onClick={() => setPage('levels')}>К уровням</button>}
+                  {playMode.kind === 'online' && <button className="restart-button" onClick={() => setPage('online')}>К онлайн-уровням</button>}
                 </div>
               </div>
             </div>

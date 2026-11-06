@@ -19,6 +19,32 @@ interface Props {
   onClose: () => void;
 }
 
+/** Free-typing number input (no upper limit); a value is applied as soon as it is a valid number. */
+function NumField({ label, value, step = 0.1, min, onCommit }: { label: string; value: number; step?: number; min?: number; onCommit: (n: number) => void }) {
+  const [text, setText] = useState(String(value));
+  return (
+    <div className="ed-field">
+      <span>{label}</span>
+      <input
+        type="number" inputMode="decimal" step={step} min={min} value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          const n = Number(e.target.value);
+          if (e.target.value.trim() !== '' && Number.isFinite(n) && (min === undefined || n >= min)) onCommit(n);
+        }}
+      />
+    </div>
+  );
+}
+
+const DURATION_LABEL: Record<TriggerAction, string> = {
+  move: 'Время движения, с',
+  rotate: 'Время поворота, с',
+  hide: 'Плавное исчезновение, с (0 = сразу)',
+  show: 'Плавное появление, с (0 = сразу)',
+  color: 'Плавная смена цвета, с (0 = сразу)',
+};
+
 /** Properties of the current selection: group tag, colour, texture, text and trigger settings. */
 export default function EditorPanel({ level, selIds, onApply, onPickImage, onClose }: Props) {
   const ids = new Set(selIds);
@@ -128,16 +154,19 @@ export default function EditorPanel({ level, selIds, onApply, onPickImage, onClo
             <button className={`ed-tool ${t0.once ? 'is-on' : ''}`} onClick={() => forTriggers((t) => { t.once = true; })}>1 раз</button>
             <button className={`ed-tool ${!t0.once ? 'is-on' : ''}`} onClick={() => forTriggers((t) => { t.once = false; })}>каждый вход</button>
           </div>
-          {(t0.action === 'move' || t0.action === 'rotate') &&
-            stepper('Время, c', t0.duration.toFixed(1),
-              () => forTriggers((t) => { t.duration = Math.max(0.1, Math.round((t.duration - 0.1) * 10) / 10); }),
-              () => forTriggers((t) => { t.duration = Math.min(5, Math.round((t.duration + 0.1) * 10) / 10); }))}
+          <NumField label="Задержка, с" value={t0.delay ?? 0} min={0} onCommit={(n) => forTriggers((t) => { t.delay = n; })} />
+          <NumField label={DURATION_LABEL[t0.action]} value={t0.duration} min={0} onCommit={(n) => forTriggers((t) => { t.duration = n; })} />
+          {t0.duration > 0 && (
+            <div className="ed-field">
+              <span>Скорость</span>
+              <button className={`ed-tool ${(t0.ease ?? 'smooth') === 'smooth' ? 'is-on' : ''}`} onClick={() => forTriggers((t) => { t.ease = 'smooth'; })}>Плавно</button>
+              <button className={`ed-tool ${t0.ease === 'linear' ? 'is-on' : ''}`} onClick={() => forTriggers((t) => { t.ease = 'linear'; })}>Равномерно</button>
+            </div>
+          )}
           {t0.action === 'move' && (
             <>
-              {stepper('Сдвиг по X, клеток', String(t0.dx / GRID),
-                () => forTriggers((t) => { t.dx -= GRID; }), () => forTriggers((t) => { t.dx += GRID; }))}
-              {stepper('Сдвиг по Y (вниз +)', String(t0.dy / GRID),
-                () => forTriggers((t) => { t.dy -= GRID; }), () => forTriggers((t) => { t.dy += GRID; }))}
+              <NumField label="Сдвиг по X, клеток (вправо +)" value={t0.dx / GRID} step={1} onCommit={(n) => forTriggers((t) => { t.dx = n * GRID; })} />
+              <NumField label="Сдвиг по Y, клеток (вниз +)" value={t0.dy / GRID} step={1} onCommit={(n) => forTriggers((t) => { t.dy = n * GRID; })} />
             </>
           )}
           {t0.action === 'rotate' && (
