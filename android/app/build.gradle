@@ -30,7 +30,7 @@ android {
         targetSdk 35
         // GitHub Actions run number keeps growing, so each build counts as a newer version.
         versionCode runNumber
-        versionName '1.5.0'
+        versionName '1.5.1'
     }
 }
 

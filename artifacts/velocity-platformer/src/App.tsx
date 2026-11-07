@@ -1153,7 +1153,7 @@ function App() {
         <button className="sr-menu-button" onClick={() => { const d = (window as unknown as { srDesktop?: { quit: () => void } }).srDesktop; if (d) d.quit(); else window.alert('Чтобы выйти из игры, закройте вкладку браузера.'); }}>ВЫХОД</button>
       </nav>
       <div className="sr-rooftop"><div className="sr-robot"><i /><b /><span /></div></div>
-      <div className="sr-version" onClick={tapVersion}>v1.5.0{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
+      <div className="sr-version" onClick={tapVersion}>v1.5.1{devMode ? ' · DEV' : ''}{tapCount > 0 ? ` · ${tapCount}/5` : ''}</div>
       {devDialog !== 'closed' && (
         <div className="sr-dev-dialog" role="dialog" aria-modal="true">
           <div className="sr-dev-card">

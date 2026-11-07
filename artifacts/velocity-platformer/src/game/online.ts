@@ -13,29 +13,43 @@ export const onlineEnabled = () => !!ONLINE.url && !!ONLINE.anonKey;
 
 const MAX_UPLOAD_BYTES = 900_000;
 
+function baseUrl(): string {
+  // Tolerate a pasted URL with spaces, a trailing slash or a "/rest/v1" tail.
+  return ONLINE.url.trim().replace(/\/+$/, "").replace(/\/rest\/v1$/, "");
+}
+
 async function call(path: string, init: RequestInit = {}): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
+  let res: Response;
   try {
-    const res = await fetch(`${ONLINE.url.replace(/\/$/, "")}${path}`, {
+    res = await fetch(`${baseUrl()}${path}`, {
       ...init,
       signal: controller.signal,
       headers: {
-        apikey: ONLINE.anonKey,
-        Authorization: `Bearer ${ONLINE.anonKey}`,
+        apikey: ONLINE.anonKey.trim(),
+        Authorization: `Bearer ${ONLINE.anonKey.trim()}`,
         "Content-Type": "application/json",
         ...(init.headers ?? {}),
       },
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res;
   } catch (e) {
     if (e instanceof Error && e.name === "AbortError") throw new Error("Сервер не отвечает. Проверьте интернет.");
-    if (e instanceof Error && e.message.startsWith("HTTP")) throw new Error(`Ошибка сервера (${e.message}).`);
-    throw new Error("Нет связи с сервером. Проверьте интернет.");
+    throw new Error("Нет связи с сервером. Проверьте интернет и адрес сервера в onlineConfig.ts.");
   } finally {
     clearTimeout(timer);
   }
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = (await res.json()) as { message?: string; code?: string; hint?: string };
+      detail = [body.code, body.message].filter(Boolean).join(": ");
+    } catch { /* the body is not JSON */ }
+    if (res.status === 404) throw new Error(`Ошибка 404: таблица levels не найдена или неверный адрес. Выполните SQL из ONLINE_SETUP_RU.md и проверьте url. ${detail}`.trim());
+    if (res.status === 401 || res.status === 403) throw new Error(`Ошибка ${res.status}: сервер не принял ключ anon или права. ${detail}`.trim());
+    throw new Error(`Ошибка сервера ${res.status}. ${detail}`.trim());
+  }
+  return res;
 }
 
 export async function listLevels(sort: "new" | "top"): Promise<OnlineLevelInfo[]> {
